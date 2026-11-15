@@ -1,0 +1,28 @@
+{
+  "by_agent": {
+    "planner": {
+      "api_calls": 1,
+      "input_tokens": 766,
+      "output_tokens": 479,
+      "total_tokens": 1245
+    },
+    "coder": {
+      "api_calls": 5,
+      "input_tokens": 13228,
+      "output_tokens": 5581,
+      "total_tokens": 18809
+    },
+    "tester": {
+      "api_calls": 1,
+      "input_tokens": 4316,
+      "output_tokens": 2949,
+      "total_tokens": 7265
+    }
+  },
+  "total": {
+    "api_calls": 7,
+    "input_tokens": 18310,
+    "output_tokens": 9009,
+    "total_tokens": 27319
+  }
+}

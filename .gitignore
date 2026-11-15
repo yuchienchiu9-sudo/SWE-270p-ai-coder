@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# AI Coder output (one folder per run; see examples/sample_output for a sample)
+generated/

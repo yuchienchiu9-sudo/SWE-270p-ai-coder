@@ -1,0 +1,55 @@
+{
+  "project_name": "QuickDelivery",
+  "summary": "A simplified food delivery application built with Python and Streamlit featuring restaurant browsing, single-restaurant shopping cart, simulated payment, and auto-updating order tracking.",
+  "features": [
+    "Browse multiple restaurants with cuisines, ratings, delivery times, and full menus",
+    "Add and remove items from a shopping cart with single-restaurant enforcement and validation",
+    "Simulate credit card payments with basic format validation",
+    "Track active orders with automatic status progression over time (Pending -> Preparing -> Delivering -> Delivered)",
+    "Tab-based Streamlit navigation for Restaurants, Cart, and Orders"
+  ],
+  "files": [
+    {
+      "filename": "models.py",
+      "purpose": "Contains data classes and initial seed data for restaurants, menu items, cart items, and orders.",
+      "depends_on": []
+    },
+    {
+      "filename": "cart.py",
+      "purpose": "Contains CartManager class to manage shopping cart items, single-restaurant rule enforcement, quantity updates, and subtotal/total calculations.",
+      "depends_on": [
+        "models.py"
+      ]
+    },
+    {
+      "filename": "payment.py",
+      "purpose": "Contains payment validation logic checking card number format, expiry date, and CVV.",
+      "depends_on": []
+    },
+    {
+      "filename": "order_manager.py",
+      "purpose": "Contains OrderManager class to handle order placement, unique IDs, and automatic status progression rules based on elapsed time.",
+      "depends_on": [
+        "models.py",
+        "cart.py",
+        "payment.py"
+      ]
+    },
+    {
+      "filename": "app.py",
+      "purpose": "Streamlit user interface with tabs for Restaurants, Cart, and Orders, autorefresh for order status, and session state management.",
+      "depends_on": [
+        "models.py",
+        "cart.py",
+        "payment.py",
+        "order_manager.py"
+      ]
+    }
+  ],
+  "dependencies": [
+    "streamlit",
+    "pytest"
+  ],
+  "primary_color": "#D35400",
+  "test_file": "test_app.py"
+}

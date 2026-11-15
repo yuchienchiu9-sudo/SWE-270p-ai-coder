@@ -1,0 +1,13 @@
+[theme]
+base = "light"
+primaryColor = "#D35400"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#FBF1EB"
+textColor = "#1F2937"
+borderColor = "#E5E7EB"
+showWidgetBorder = true
+baseRadius = "large"
+buttonRadius = "full"
+
+[client]
+toolbarMode = "minimal"

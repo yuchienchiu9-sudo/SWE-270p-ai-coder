@@ -1,5 +1,7 @@
 # Name: Yu-Chien Chiu
 # Student ID: 56176405
+# Name: Mars Huang
+# Student ID: 79666292
 """
 MCP server of the AI Coder (stdio transport).
 

@@ -1,5 +1,7 @@
 # Name: Yu-Chien Chiu
 # Student ID: 56176405
+# Name: Mars Huang
+# Student ID: 79666292
 """
 Tester Agent: writes one pytest file covering every logic module of the
 generated application. The Streamlit UI (app.py) is not unit tested.

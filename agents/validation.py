@@ -1,5 +1,7 @@
 # Name: Yu-Chien Chiu
 # Student ID: 56176405
+# Name: Mars Huang
+# Student ID: 79666292
 """
 Checks shared by the agents. Each check raises ValueError or SyntaxError
 with a clear message; llm.generate_json() sends that message back to

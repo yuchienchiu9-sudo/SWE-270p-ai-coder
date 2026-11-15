@@ -1,6 +1,6 @@
 # AI Coder: Multi-Agent Code Generation with MCP
 
-SWE 270P Final Project. Author: Yu-Chien Chiu (56176405)
+SWE 270P Final Project. Authors: Yu-Chien Chiu (56176405), Mars Huang (79666292)
 
 AI Coder takes a **software description and requirements** in a web UI and
 generates a complete **Python + Streamlit application with pytest tests**.

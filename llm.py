@@ -4,7 +4,8 @@
 Shared Gemini client used by every agent.
 
 Responsibilities:
-- Send a prompt to Gemini and parse the JSON reply.
+- Send a prompt to Gemini and return either a JSON object (generate_json)
+  or the plain text of a source file (generate_code).
 - Retry on temporary server errors (429/500/503/504), invalid JSON,
   and agent-specific validation failures (e.g. Python SyntaxError).
 - Count every API call and its input/output/total tokens, including
@@ -24,7 +25,8 @@ from google.genai import errors, types
 load_dotenv()
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = 3        # replies that fail parsing/validation
+MAX_SERVER_RETRIES = 4  # waits on 429/5xx per request (2, 4, 8, 16 s)
 RETRYABLE_STATUS = {429, 500, 503, 504}
 TIMEOUT_MS = 120_000
 
@@ -89,53 +91,69 @@ def _usage_from_response(response) -> Usage:
     )
 
 
-def generate_json(
-    prompt: str,
-    validate: Optional[Callable[[dict], None]] = None,
-) -> tuple[dict, Usage]:
+def _call_gemini(prompt: str, json_mode: bool, usage: Usage):
     """
-    Ask Gemini for a JSON object and return (parsed_object, usage).
+    Send one request, waiting and retrying on temporary server errors
+    (429/5xx) up to MAX_SERVER_RETRIES times. Every request is counted.
+    """
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json" if json_mode else "text/plain"
+    )
+    for retry in range(MAX_SERVER_RETRIES + 1):
+        try:
+            response = _get_client().models.generate_content(
+                model=MODEL, contents=prompt, config=config
+            )
+            usage.add(_usage_from_response(response))
+            return response
+        except errors.APIError as exc:
+            usage.api_calls += 1
+            if exc.code in RETRYABLE_STATUS and retry < MAX_SERVER_RETRIES:
+                wait = 2 ** (retry + 1)
+                print(f"  Gemini error {exc.code}, retrying in {wait}s...", flush=True)
+                time.sleep(wait)
+                continue
+            raise LLMError(f"Gemini API error: {exc}") from exc
 
-    `validate` is an optional function that raises ValueError or SyntaxError
-    if the reply is unusable; the error message is sent back to Gemini on the
-    next attempt so it can correct itself.
+
+def _strip_code_fences(text: str) -> str:
+    """Remove a surrounding ```python ... ``` block if Gemini added one."""
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines)
+    return text + "\n"
+
+
+def _generate(
+    prompt: str,
+    json_mode: bool,
+    validate: Optional[Callable] = None,
+) -> tuple[object, Usage]:
+    """
+    Shared loop: call Gemini, parse the reply, validate it, and on failure
+    re-ask with the error message (up to MAX_ATTEMPTS replies).
     """
     usage = Usage()
     current_prompt = prompt
     last_error: Exception | None = None
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        # 1. Call Gemini, retrying temporary server errors with backoff.
-        try:
-            response = _get_client().models.generate_content(
-                model=MODEL,
-                contents=current_prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json"
-                ),
-            )
-        except errors.APIError as exc:
-            usage.api_calls += 1
-            last_error = exc
-            if exc.code in RETRYABLE_STATUS and attempt < MAX_ATTEMPTS:
-                wait = 2 ** attempt
-                print(f"  Gemini error {exc.code}, retrying in {wait}s...", flush=True)
-                time.sleep(wait)
-                continue
-            raise LLMError(f"Gemini API error: {exc}") from exc
-
-        usage.add(_usage_from_response(response))
-
-        # 2. Parse and validate the reply; on failure, ask Gemini to fix it.
+        response = _call_gemini(current_prompt, json_mode, usage)
         try:
             if not response.text:
                 raise ValueError("Empty response.")
-            data = json.loads(response.text)
-            if not isinstance(data, dict):
-                raise ValueError("Reply must be a JSON object.")
+            if json_mode:
+                result = json.loads(response.text)
+                if not isinstance(result, dict):
+                    raise ValueError("Reply must be a JSON object.")
+            else:
+                result = _strip_code_fences(response.text)
             if validate is not None:
-                validate(data)
-            return data, usage
+                validate(result)
+            return result, usage
         except (ValueError, SyntaxError) as exc:
             # json.JSONDecodeError is a subclass of ValueError.
             last_error = exc
@@ -146,6 +164,29 @@ def generate_json(
             )
 
     raise LLMError(f"No valid reply after {MAX_ATTEMPTS} attempts: {last_error}")
+
+
+def generate_json(
+    prompt: str,
+    validate: Optional[Callable[[dict], None]] = None,
+) -> tuple[dict, Usage]:
+    """
+    Ask Gemini for a JSON object; returns (parsed_object, usage).
+    `validate` raises ValueError/SyntaxError if the object is unusable.
+    """
+    return _generate(prompt, json_mode=True, validate=validate)
+
+
+def generate_code(
+    prompt: str,
+    validate: Optional[Callable[[str], None]] = None,
+) -> tuple[str, Usage]:
+    """
+    Ask Gemini for the plain text of one source file; returns (code, usage).
+    Plain text avoids the escaping errors that happen when code is put in JSON.
+    `validate` raises ValueError/SyntaxError if the code is unusable.
+    """
+    return _generate(prompt, json_mode=False, validate=validate)
 
 
 if __name__ == "__main__":

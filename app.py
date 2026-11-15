@@ -1,13 +1,20 @@
-
-# Name: YOUR_NAME
-# Student ID: YOUR_STUDENT_ID
-
+# Name: Yu-Chien Chiu
+# Student ID: 56176405
+from services.llm_client import generate_code
 import gradio as gr
 
 
+
+
 def generate_application(requirements: str) -> str:
-    """Display the received software requirements."""
-    return f"Received requirements:\n{requirements}"
+    """Generate Python code using Gemini."""
+    if not requirements.strip():
+        raise gr.Error("Please enter software requirements.")
+
+    try:
+        return generate_code(requirements)
+    except Exception as exc:
+        raise gr.Error(f"Code generation failed: {exc}")
 
 
 with gr.Blocks(title="SWE 270P AI Coder") as demo:

@@ -1,0 +1,6 @@
+google-genai==3.2.0
+gradio==6.31.0
+mcp==1.30.0
+pytest==9.2.0
+python-dotenv==1.2.4
+streamlit==1.67.0

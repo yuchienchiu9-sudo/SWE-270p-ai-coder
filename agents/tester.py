@@ -33,6 +33,7 @@ Rules:
 - Tests must be independent: create fresh objects in each test or fixture.
 - Every test function name starts with test_ and has a short docstring.
 - Write between 10 and 25 tests.
+{feedback}
 
 Reply with ONLY the complete Python source code of {test_file}.
 No explanations and no Markdown code fences.
@@ -43,11 +44,13 @@ def tester_agent(
     requirements: str,
     plan: dict,
     source_files: dict[str, str],
+    feedback: str = "",
 ) -> tuple[str, str, Usage]:
     """
     Generate pytest tests for the logic modules; returns (filename, code, usage).
 
     source_files: {filename: content} of all generated files (app.py is skipped).
+    feedback:     optional pytest failure report for a repair attempt.
     """
     logic_files = {n: c for n, c in source_files.items() if n != "app.py"}
     if not logic_files:
@@ -75,6 +78,11 @@ def tester_agent(
         sources="\n\n".join(f"--- {n} ---\n{c}" for n, c in logic_files.items()),
         test_file=TEST_FILENAME,
         modules=", ".join(sorted(allowed_local)),
+        feedback=(
+            "\nThe previous version of the tests failed as shown below. Where a test "
+            "contradicts the source code but not the requirements, fix the test.\n"
+            f"{feedback}\n" if feedback else ""
+        ),
     )
 
     code, usage = generate_code(prompt, validate=validate)

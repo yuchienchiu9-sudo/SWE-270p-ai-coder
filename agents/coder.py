@@ -63,12 +63,14 @@ def coder_agent(
     filename: str,
     existing_files: dict[str, str],
     feedback: str = "",
+    current_code: str = "",
 ) -> tuple[str, Usage]:
     """
     Generate the content of `filename`; returns (code, usage).
 
     existing_files: contents of the files `filename` depends on.
     feedback:       optional error report (e.g. failing tests) for a repair attempt.
+    current_code:   the file's current content, so a repair can make minimal changes.
     """
     entry = next((f for f in plan["files"] if f["filename"] == filename), None)
     if entry is None:
@@ -92,8 +94,13 @@ def coder_agent(
     feedback_block = ""
     if feedback:
         feedback_block = (
-            f"\nA previous version of {filename} had these problems. Fix them:\n"
-            f"{feedback}\n"
+            f"\nThis is a REPAIR. Current version of {filename}:\n"
+            f"--- {filename} ---\n{current_code or '(missing)'}\n\n"
+            f"Problems found by testing:\n{feedback}\n\n"
+            "Make the smallest change that fixes the problems in this file. Keep all "
+            "existing class names, function names and signatures. If a failing test "
+            "contradicts the requirements, keep the behavior the requirements describe. "
+            "If this file is not the cause, return it unchanged.\n"
         )
 
     prompt = PROMPT.format(

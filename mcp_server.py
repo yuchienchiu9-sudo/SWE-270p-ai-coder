@@ -42,7 +42,7 @@ WORKSPACE_FILES = {"requirements.md", "plan.json", "requirements.txt", "usage.js
 TEST_TIMEOUT_S = 60
 SECRET_ENV_WORDS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
 
-mcp = FastMCP("AI Coder")
+mcp = FastMCP("AI Coder", log_level="WARNING")
 
 
 # ---------- workspace helpers ----------
@@ -181,8 +181,9 @@ def write_code(run_id: str, filename: str, feedback: str = "") -> dict:
         raise ValueError(f"{filename} is not in the plan.")
     deps = {name: _read(run, name) for name in entry["depends_on"]}
     requirements = _read(run, "requirements.md")
+    current = (run / filename).read_text(encoding="utf-8") if feedback and (run / filename).is_file() else ""
 
-    code, usage = coder_agent(requirements, current_plan, filename, deps, feedback)
+    code, usage = coder_agent(requirements, current_plan, filename, deps, feedback, current)
     _write(run, filename, code)
     total = _record_usage(run, "coder", usage)
     return {
@@ -194,14 +195,17 @@ def write_code(run_id: str, filename: str, feedback: str = "") -> dict:
 
 
 @mcp.tool()
-def write_tests(run_id: str) -> dict:
-    """Tester Agent: read plan.json and all source files, write test_app.py."""
+def write_tests(run_id: str, feedback: str = "") -> dict:
+    """
+    Tester Agent: read plan.json and all source files, write test_app.py.
+    `feedback` is an optional pytest failure report used to repair the tests.
+    """
     run = _run_dir(run_id)
     current_plan = _load_plan(run)
     sources = {f["filename"]: _read(run, f["filename"]) for f in current_plan["files"]}
     requirements = _read(run, "requirements.md")
 
-    name, code, usage = tester_agent(requirements, current_plan, sources)
+    name, code, usage = tester_agent(requirements, current_plan, sources, feedback)
     _write(run, name, code)
     total = _record_usage(run, "tester", usage)
     return {

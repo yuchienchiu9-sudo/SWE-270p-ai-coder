@@ -6,12 +6,15 @@ file-by-file implementation plan for a Python + Streamlit application.
 """
 
 import json
+import re
 
 from agents.validation import FILENAME_PATTERN, TEST_FILENAME
 from llm import Usage, generate_json
 
 MAX_FILES = 6
 REQUIRED_PACKAGES = ["streamlit", "pytest"]
+HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
+DEFAULT_COLOR = "#E8590C"
 
 PROMPT = """You are the Planner Agent in a multi-agent AI coding system.
 
@@ -38,7 +41,8 @@ Return ONLY a JSON object with exactly these keys:
       "depends_on": ["other_file.py"]
     }}
   ],
-  "dependencies": ["streamlit"]
+  "dependencies": ["streamlit"],
+  "primary_color": "#RRGGBB"
 }}
 
 Rules for "files":
@@ -48,6 +52,8 @@ Rules for "files":
 - "purpose" must name the main classes/functions so other agents can use them consistently.
 
 "dependencies" lists pip packages needed to run the app (not the standard library).
+"primary_color" is a hex brand color that fits the application's domain
+(e.g. a warm orange for food, a calm blue for finance), dark enough for white text.
 
 Software description and requirements:
 {requirements}
@@ -115,6 +121,9 @@ def planner_agent(requirements: str) -> tuple[dict, Usage]:
             deps.append(pkg)
     plan["dependencies"] = deps
     plan["test_file"] = TEST_FILENAME
+    # A bad color is not worth another API call; fall back to a default.
+    if not HEX_COLOR.match(str(plan.get("primary_color", ""))):
+        plan["primary_color"] = DEFAULT_COLOR
 
     return plan, usage
 

@@ -100,6 +100,37 @@ def _record_usage(run: Path, agent: str, usage: Usage) -> dict:
     return data["total"]
 
 
+THEME_TEMPLATE = """[theme]
+base = "light"
+primaryColor = "{primary}"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "{tint}"
+textColor = "#1F2937"
+borderColor = "#E5E7EB"
+showWidgetBorder = true
+baseRadius = "large"
+buttonRadius = "full"
+
+[client]
+toolbarMode = "minimal"
+"""
+
+
+def _write_theme(run: Path, primary: str) -> None:
+    """
+    Write .streamlit/config.toml so the generated app gets a consistent look
+    (brand color from the plan, a light tint of it, rounded widgets). This is
+    deterministic and costs no LLM tokens.
+    """
+    rgb = [int(primary[i:i + 2], 16) for i in (1, 3, 5)]
+    tint = "#" + "".join(f"{round(c + (255 - c) * 0.92):02X}" for c in rgb)
+    folder = run / ".streamlit"
+    folder.mkdir(exist_ok=True)
+    (folder / "config.toml").write_text(
+        THEME_TEMPLATE.format(primary=primary, tint=tint), encoding="utf-8"
+    )
+
+
 def _safe_env() -> dict:
     """Environment for running generated code, without API keys or secrets."""
     return {
@@ -163,6 +194,7 @@ def plan(run_id: str) -> dict:
     result, usage = planner_agent(requirements)
     _write(run, "plan.json", json.dumps(result, indent=2, ensure_ascii=False))
     _write(run, "requirements.txt", "\n".join(result["dependencies"]) + "\n")
+    _write_theme(run, result["primary_color"])
     total = _record_usage(run, "planner", usage)
     return {"plan": result, "usage": usage.to_dict(), "run_total": total}
 

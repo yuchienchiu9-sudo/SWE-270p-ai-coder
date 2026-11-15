@@ -35,8 +35,11 @@ Rules:
 - Only import the project modules listed above, the Python standard library,
   and these packages: {packages}.
 - Give every class and function a short docstring explaining what it does.
-- Use plain ASCII text in string literals: no emoji, no \\u escapes, and no
-  backslash-dollar; format money like f"${{price:.2f}}" or "USD 9.99".
+- Never write \\u escape sequences; write emoji as the characters themselves (e.g. "🍔").
+- Money: write f"${{amount:.2f}}" so it displays like $12.50. In markdown text
+  (st.markdown, st.caption, st.write, labels) that contains two or more amounts,
+  write each dollar sign as \\\\$ (two backslashes in the source) so Streamlit does
+  not read the text between them as a math formula.
 - {ui_rule}
 {feedback}
 Reply with ONLY the complete Python source code of {filename}.
@@ -45,15 +48,25 @@ No explanations and no Markdown code fences.
 
 UI_RULE = """This is the Streamlit UI. Keep st.session_state for state that must survive
   reruns, and call the logic modules instead of re-implementing logic.
-  UI guidelines:
-  * Use st.set_page_config(layout="wide") and show the main sections with st.tabs at
-    the top of the page, not a sidebar selectbox.
-  * Show items as cards using st.container(border=True) inside st.columns.
-  * Use st.metric for key numbers (e.g. totals), st.progress for progress, and
-    st.success / st.error / st.toast to confirm actions or show validation errors.
+  The app has a theme (colors, rounded corners) in .streamlit/config.toml; do not
+  add custom CSS or HTML. Make it look like a polished modern product:
+  * st.set_page_config(page_title=..., page_icon=<one emoji>, layout="wide").
+  * A header: st.title with a fitting emoji and a one-line st.caption tagline.
+  * Main sections as st.tabs at the top (not a sidebar selectbox). Tab labels may
+    start with Material icons, e.g. ":material/restaurant: Restaurants".
+  * Show collections as a grid of cards: st.columns(3) with
+    st.container(border=True) per item; inside a card put a bold name, a short
+    st.caption with details, and the price or key value.
+  * Buttons: type="primary" for the main action on each screen, and a Material
+    icon where helpful, e.g. st.button("Add", icon=":material/add_shopping_cart:").
+  * Status labels: st.badge(text, color=...) where color is one of red, orange,
+    yellow, blue, green, violet, gray, primary.
+  * Use st.metric for key numbers (e.g. totals), st.progress for progress,
+    st.divider between groups, and st.success / st.error / st.toast for feedback.
+  * Empty states: st.info with a friendly message telling the user what to do next.
   * For anything that changes over time, put it in a function decorated with
     @st.fragment(run_every="2s") so it refreshes automatically without clicks.
-  * Disable or hide buttons whose action is not currently allowed."""
+  * Disable buttons whose action is not currently allowed."""
 LOGIC_RULE = (
     "Do not import streamlit or read user input; this module must be unit-testable. "
     "Functions whose result depends on the current time must accept the time as an "

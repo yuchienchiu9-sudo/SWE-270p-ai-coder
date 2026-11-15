@@ -54,13 +54,13 @@ def usage_rows(usage: dict) -> list[list]:
 
 
 def zip_run(run_path: str) -> str:
-    """Zip the generated application (without caches) and return the zip path."""
+    """Zip the generated application (incl. .streamlit theme, without caches)."""
     folder = Path(run_path)
     zip_path = folder.with_suffix(".zip")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for file in folder.iterdir():
-            if file.is_file():
-                zf.write(file, arcname=f"{folder.name}/{file.name}")
+        for file in folder.rglob("*"):
+            if file.is_file() and "__pycache__" not in file.parts:
+                zf.write(file, arcname=f"{folder.name}/{file.relative_to(folder).as_posix()}")
     return str(zip_path)
 
 

@@ -1,7 +1,7 @@
 QuickDelivery is a simplified food delivery application built with Python and Streamlit.
 
 Requirements:
-1. Users can browse a predefined list of restaurants and view each restaurant's menu (item name and price).
+1. Users can browse a predefined list of at least four restaurants. Each restaurant shows its cuisine type, rating (out of 5) and estimated delivery time, and has a menu where each item has a name, a short description and a price.
 2. Users can add food items to a shopping cart and remove them from it.
 3. Cart quantities must be positive integers; invalid quantities are rejected with an error.
 4. A cart can only contain items from one restaurant at a time.

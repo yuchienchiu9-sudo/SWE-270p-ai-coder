@@ -242,7 +242,8 @@ def main() -> None:
     for agent, used in result["usage"]["by_agent"].items():
         print(f"  {agent:8} {used['api_calls']:2} calls  {used['total_tokens']:6} tokens")
     print(f"\nOutput: {result['path']}")
-    print(f"Run the app:  streamlit run {Path(result['path']) / 'app.py'}")
+    # Run from inside the folder so Streamlit picks up .streamlit/config.toml.
+    print(f'Run the app:  cd "{result["path"]}"  then  streamlit run app.py')
     sys.exit(0 if result["success"] else 1)
 
 

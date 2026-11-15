@@ -43,11 +43,22 @@ Reply with ONLY the complete Python source code of {filename}.
 No explanations and no Markdown code fences.
 """
 
-UI_RULE = (
-    "This is the Streamlit UI. Keep st.session_state for state that must survive "
-    "reruns, and call the logic modules instead of re-implementing logic."
+UI_RULE = """This is the Streamlit UI. Keep st.session_state for state that must survive
+  reruns, and call the logic modules instead of re-implementing logic.
+  UI guidelines:
+  * Use st.set_page_config(layout="wide") and show the main sections with st.tabs at
+    the top of the page, not a sidebar selectbox.
+  * Show items as cards using st.container(border=True) inside st.columns.
+  * Use st.metric for key numbers (e.g. totals), st.progress for progress, and
+    st.success / st.error / st.toast to confirm actions or show validation errors.
+  * For anything that changes over time, put it in a function decorated with
+    @st.fragment(run_every="2s") so it refreshes automatically without clicks.
+  * Disable or hide buttons whose action is not currently allowed."""
+LOGIC_RULE = (
+    "Do not import streamlit or read user input; this module must be unit-testable. "
+    "Functions whose result depends on the current time must accept the time as an "
+    "optional parameter (e.g. now: float | None = None) so tests can pass a fixed time."
 )
-LOGIC_RULE = "Do not import streamlit or read user input; this module must be unit-testable."
 
 
 def _format_files(files: dict[str, str]) -> str:

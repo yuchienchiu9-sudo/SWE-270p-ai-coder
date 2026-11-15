@@ -9,5 +9,6 @@ Requirements:
 6. Users can place an order from a non-empty cart.
 7. Payment is simulated (no real transactions): card number, expiry date and CVV are checked for a basic valid format, and the payment is approved or declined.
 8. A successful payment creates an order with a unique order ID and empties the cart.
-9. Each order has a status of Pending, Preparing, Delivering or Delivered. New orders start as Pending, and the status can only move forward in that order.
-10. Users can view their orders and their current status.
+9. Each order has a status of Pending, Preparing, Delivering or Delivered. Order progress is simulated: a new order starts as Pending and automatically moves forward one step every 10 seconds until it is Delivered. The status never moves backward.
+10. Users can view all their orders with the current status, a progress bar, and the time of the next update; the order view refreshes by itself without the user clicking anything.
+11. The main sections (Restaurants, Cart, Orders) are shown as tabs at the top of the page, so users can switch between them with one click.

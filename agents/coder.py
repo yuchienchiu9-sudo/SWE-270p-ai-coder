@@ -6,32 +6,52 @@ import json
 
 from google.genai import types
 from services.llm_client import client
-from agents.planner import planner_agent
+from pathlib import Path
 
 
-def coder_agent(plan: dict) -> dict:
+def coder_agent(plan: dict, target_file: str = "models.py") -> dict:
     """Generate a Python source file based on the implementation plan."""
+    output_dir = Path("generated") / "quickdelivery"
+    
+    existing_files = {}
+    
+    for filename in ["models.py", "data.py", "payment.py"]:
+        file_path = output_dir / filename
+    
+        if file_path.exists() and filename != target_file:
+            existing_files[filename] = file_path.read_text(
+                encoding="utf-8"
+            )
+    
 
     prompt = f"""
-    You are a Python software developer (Coder Agent).
+    You are a Python software engineer working on QuickDelivery.
 
-    Your task is to generate ONE executable Python source file
-    based on the implementation plan below.
-
-    Implementation Plan:
+    Project implementation plan:
     {json.dumps(plan, indent=2)}
+    
+    Existing project files:
+    {json.dumps(existing_files, indent=2)}
+
+    IMPORTANT:
+    - Use the exact existing class and function names.
+    - Use the actual parameter signatures from existing files.
+    - Do not import classes or functions that do not exist.
+    - Do not invent methods.
+    - Make the generated file compatible with existing modules.
+
+    Your task is to generate ONLY this file:
+    {target_file}
 
     Requirements:
-    1. Generate ONLY models.py for the QuickDelivery application.
-    2. Implement cart management and basic order management.
-    3. Use Python standard libraries only.
-    4. Do not use external databases or payment APIs.
-    5. Keep the code simple and executable.
-    6. Include docstrings for implemented functions and methods.
-    7. Return a JSON object with exactly two fields:
-       "filename" and "content".
-    8. The "content" field must contain valid Python source code.
-    9. Do not include Markdown code fences.
+    1. Follow the implementation plan.
+    2. Generate complete, executable code for the requested file.
+    3. Keep the code compatible with other QuickDelivery modules.
+    4. Do not generate unrelated files.
+    5. Return a JSON object with exactly two fields:
+       "filename": "{target_file}"
+       "content": "Complete file content"
+    6. Return valid JSON without Markdown code fences.
     """
 
     response = client.models.generate_content(
@@ -45,12 +65,21 @@ def coder_agent(plan: dict) -> dict:
     if not response.text:
         raise ValueError("Coder Agent returned an empty response.")
 
-    result = json.loads(response.text)
+    try:
+        result = json.loads(response.text)
+    except json.JSONDecodeError as exc:
+        print("\nCoder Agent returned invalid JSON.", flush=True)
+        print(f"Error: {exc}", flush=True)
+
+        print("\nRaw Gemini response:", flush=True)
+        print(repr(response.text[:1500]), flush=True)
+
+        raise
 
     if not isinstance(result, dict):
         raise ValueError("Coder response must be a JSON object.")
 
-    if result.get("filename") != "models.py":
+    if result.get("filename") != target_file:
         raise ValueError("Unexpected filename from Coder Agent.")
 
     code = result.get("content")
@@ -59,31 +88,52 @@ def coder_agent(plan: dict) -> dict:
         raise ValueError("Coder Agent returned no source code.")
 
     # Check Python syntax without executing generated code.
-    compile(code, "models.py", "exec")
+    try:
+        if target_file.endswith(".py"):
+            compile(code, target_file, "exec")
+    except SyntaxError as exc:
+        print("\nGenerated code contains a SyntaxError:", flush=True)
+        print(
+            f"Line {exc.lineno}: {exc.msg}",
+            flush=True
+        )
+
+        lines = code.splitlines()
+        start = max(0, (exc.lineno or 1) - 6)
+        end = min(len(lines), (exc.lineno or 1) + 3)
+
+        print("\nCode near the error:", flush=True)
+
+        for i in range(start, end):
+            print(f"{i + 1:3}: {lines[i]}", flush=True)
+
+        raise
 
     return result
 
 
+
 if __name__ == "__main__":
-    requirements = """
-    Build a QuickDelivery application.
+    from save_results import save_code
 
-    Users can:
-    1. Browse predefined restaurants and menus.
-    2. Add and remove items in a shopping cart.
-    3. Place food orders.
-    4. Track simulated order status.
-    5. Simulate payments.
+    # Load the previously generated plan.
+    plan_path = Path("generated/quickdelivery/plan.json")
 
-    Use Streamlit and pytest.
-    """
+    with plan_path.open("r", encoding="utf-8") as file:
+        plan = json.load(file)
 
-    print("Step 1: Running Planner Agent...", flush=True)
-    plan = planner_agent(requirements)
+    # Generate the restaurant and menu data file.
+    target_file = "payment.py"
 
-    print("Step 2: Running Coder Agent...", flush=True)
-    result = coder_agent(plan)
+    print(f"Running Coder Agent for {target_file}...", flush=True)
 
+    # Step 1: Generate code using Gemini.
+    result = coder_agent(plan, target_file=target_file)
+
+    # Step 2: Save the generated code.
+    saved_path = save_code(result)
+
+    print(f"\nSaved generated file: {saved_path}")
     print("\nGenerated filename:", result["filename"])
     print("\nGenerated Python Code:\n")
     print(result["content"])

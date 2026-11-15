@@ -14,6 +14,7 @@ Responsibilities:
 
 import json
 import os
+import sys
 import time
 from dataclasses import asdict, dataclass
 from typing import Callable, Optional
@@ -63,6 +64,11 @@ class Usage:
         return cls(**{k: int(data.get(k, 0)) for k in cls.__dataclass_fields__})
 
 
+def _log(message: str) -> None:
+    """Print progress to stderr; stdout is reserved for the MCP stdio protocol."""
+    print(f"  [llm] {message}", file=sys.stderr, flush=True)
+
+
 def _get_client() -> genai.Client:
     """Create the Gemini client on first use, reading GEMINI_API_KEY from .env."""
     global _client
@@ -110,7 +116,7 @@ def _call_gemini(prompt: str, json_mode: bool, usage: Usage):
             usage.api_calls += 1
             if exc.code in RETRYABLE_STATUS and retry < MAX_SERVER_RETRIES:
                 wait = 2 ** (retry + 1)
-                print(f"  Gemini error {exc.code}, retrying in {wait}s...", flush=True)
+                _log(f"Gemini error {exc.code}, retrying in {wait}s...")
                 time.sleep(wait)
                 continue
             raise LLMError(f"Gemini API error: {exc}") from exc
@@ -157,7 +163,7 @@ def _generate(
         except (ValueError, SyntaxError) as exc:
             # json.JSONDecodeError is a subclass of ValueError.
             last_error = exc
-            print(f"  Invalid reply (attempt {attempt}): {exc}", flush=True)
+            _log(f"Invalid reply (attempt {attempt}): {exc}")
             current_prompt = (
                 f"{prompt}\n\nYour previous reply was rejected because: {exc}\n"
                 "Return a corrected, complete reply that follows all instructions."

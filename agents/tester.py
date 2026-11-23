@@ -34,6 +34,14 @@ Rules:
   edge cases and invalid input (use pytest.raises where errors are raised).
 - Tests must be independent: create fresh objects in each test or fixture.
 - Every test function name starts with test_ and has a short docstring.
+- Numbered input requirements map to IDs FR1, FR2, etc. in their original order.
+  For each test, start its docstring with the matching IDs, for example:
+      "FR3: Reject zero and negative cart quantities."
+      "FR6, FR8: Successful checkout clears the cart."
+- Only tag a requirement if the test actually asserts behavior relevant to it.
+  Do not claim UI-only requirements are covered by logic unit tests.
+- Prefer meaningful positive, negative, boundary-case assertions. Never add
+  placeholder tests (e.g. 'assert True') merely to inflate coverage.
 - Write between 10 and 25 tests.
 {feedback}
 

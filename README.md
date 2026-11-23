@@ -6,7 +6,8 @@ AI Coder takes a **software description and requirements** in a web UI and
 generates a complete **Python + Streamlit application with pytest tests**.
 Three agents (Planner, Coder, Tester) work behind an **MCP server**, and an MCP
 client coordinates them. The system runs the generated tests, checks that the
-app starts, repairs failures, and reports **LLM usage (API calls and tokens)**.
+app starts, repairs failures, reports **requirements-to-test traceability**,
+and tracks **LLM usage (API calls and tokens)**.
 
 Our selected application is **QuickDelivery**, a simplified food delivery app.
 QuickDelivery is the *output* of AI Coder; its requirements are in
@@ -38,7 +39,7 @@ In the UI:
 1. Click **Load QuickDelivery example** (or type your own description and requirements).
 2. Click **Generate**. Agent progress streams live (about 1–2 minutes).
 3. Inspect the tabs: **Generated code**, **Generated tests**, **Test results**,
-   **Plan**, **LLM usage**.
+   **Plan**, **LLM usage**, **Requirements coverage**.
 4. In **Run the app**, download the zip or click **Launch generated app**
    (opens the generated app at http://localhost:8502).
 
@@ -72,13 +73,14 @@ pytest test_app.py
 └─────────┬──────────┘
           │ MCP over stdio (client starts the server as a subprocess)
 ┌─────────▼──────────────────────────────────────────────────────────────┐
-│ mcp_server.py  (MCP server, 9 tools)                                   │
+│ mcp_server.py  (MCP server, 10 tools)                                   │
 │                                                                        │
 │  Agent tools        plan ─────────► Planner Agent  ─┐                  │
 │                     write_code ───► Coder Agent    ─┼─► llm.py ─► Gemini│
 │                     write_tests ──► Tester Agent   ─┘   (retry + usage)│
 │  Workspace tools    create_run, list_files, read_file                  │
 │  Verification       run_tests (pytest), check_app (headless Streamlit) │
+│  Coverage           validate_requirements (FR-to-test traceability)    │
 │  Usage              get_usage                                          │
 │                                                                        │
 │  Shared workspace   generated/run_<timestamp>/                         │
@@ -98,6 +100,9 @@ it**. The next agent picks that output up from the server:
    that file depends on, and writes one source file.
 4. **Tester** (`write_tests`) reads `plan.json` and all source files, and writes `test_app.py`.
 5. `run_tests` and `check_app` verify the result; failures are routed back to an agent.
+6. `validate_requirements` maps numbered functional requirements (FR1, FR2, etc.)
+   to generated pytest tests using docstring annotations. It runs after any
+   repairs and saves `coverage_report.json`.
 
 ### Agents
 
@@ -118,6 +123,7 @@ it**. The next agent picks that output up from the server:
 | `write_tests(run_id, feedback="")` | Tester Agent (feedback = repair mode) |
 | `run_tests(run_id)` | Run pytest; returns passed/failed counts and output |
 | `check_app(run_id)` | Load `app.py` once with Streamlit's headless `AppTest` and report exceptions |
+| `validate_requirements(run_id)` | Maps functional requirements to generated tests and saves `coverage_report.json` |
 | `get_usage(run_id)` | API calls and tokens per agent and in total |
 
 ### Collaboration pattern and repair
@@ -128,7 +134,7 @@ efficiency (tokens and API calls) is graded.
 
 ```
 create_run → plan → write_code × N files → write_tests → run_tests + check_app
-           → repair (only if needed) → get_usage
+           → repair (only if needed) → validate_requirements → get_usage
 ```
 
 Repair runs each stage at most once. The requirements are the source of truth,
@@ -188,6 +194,37 @@ Ways the design keeps usage low:
 
 ---
 
+## Requirements-to-test traceability
+
+After pytest and any repairs, the MCP client calls
+`validate_requirements(run_id)`. The Tester Agent is instructed to label each
+generated pytest test with the relevant requirement IDs (for example,
+`FR3: Reject invalid cart quantities`) in its docstring. The validator uses
+Python's AST to read those annotations and matches them to numbered input
+requirements. It saves `coverage_report.json` in the run folder and displays
+the result in the **Requirements coverage** tab.
+
+The report includes declared mappings, unverified requirements, unmapped tests,
+and unknown requirement IDs. This validation is deterministic and does **not**
+make an additional LLM API call. **Declared coverage is not proof that the
+requirement is correctly implemented or that the test assertions are adequate.**
+UI-only requirements may have no corresponding logic-unit-test mapping, even
+when the Streamlit app check succeeds.
+
+To test the validator without a Gemini API key:
+
+```bash
+python -m pytest tests/test_requirements_validator.py -v
+```
+
+To verify the complete integration, run `python app.py`, select
+**Load QuickDelivery example** and **Generate**, and check the
+**Requirements coverage** tab and the new run's `coverage_report.json`.
+The saved `examples/sample_output/` is an older reference generation, so it
+is not expected to contain these new test annotations or a coverage report.
+
+---
+
 ## QuickDelivery requirements
 
 The requirements we defined are in
@@ -215,12 +252,15 @@ agents/
   coder.py             Coder Agent (incl. UI guidelines for generated apps)
   tester.py            Tester Agent
   validation.py        Syntax and import checks shared by the agents
+  requirements_validator.py  FR-to-test annotation analyzer (no LLM call)
 examples/
   quickdelivery.md     Our QuickDelivery requirements
   sample_output/       One generated QuickDelivery app with tests and usage
 requirements.txt       Python dependencies
 .env.example           Template for the API key
-generated/             Output of each run (git-ignored)
+generated/             Output of each run, including coverage_report.json (git-ignored)
+tests/
+  test_requirements_validator.py  Unit tests for coverage analysis
 ```
 
 ---

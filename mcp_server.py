@@ -31,6 +31,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from agents.coder import coder_agent
+from agents.requirements_validator import analyze_coverage
 from agents.planner import planner_agent
 from agents.tester import tester_agent
 from agents.validation import FILENAME_PATTERN, TEST_FILENAME
@@ -317,6 +318,23 @@ def get_usage(run_id: str) -> dict:
     if not path.is_file():
         return {"by_agent": {}, "total": Usage().to_dict()}
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+@mcp.tool()
+def validate_requirements(run_id: str) -> dict:
+    """Analyze declared FR-to-test links; write coverage_report.json to the run.
+
+    This is annotation-based traceability, NOT proof of functional correctness.
+    No additional LLM call or token usage is incurred.
+    """
+    run = _run_dir(run_id)
+    requirements = _read(run, "requirements.md")
+    test_code = _read(run, TEST_FILENAME)
+    report = analyze_coverage(requirements, test_code)
+    (run / "coverage_report.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return report
 
 
 if __name__ == "__main__":

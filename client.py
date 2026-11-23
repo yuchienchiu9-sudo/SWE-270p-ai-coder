@@ -7,8 +7,8 @@ MCP client of the AI Coder: the orchestrator.
 
 It starts mcp_server.py over stdio and calls its tools in a fixed order:
 
-    create_run -> plan -> write_code (each planned file) -> write_tests
-    -> run_tests + check_app -> repair if needed -> get_usage
+    create_run -> plan -> write_code (each planned file) -> write_tests ->
+    run_tests + check_app -> repair if needed -> validate_requirements -> get_usage
 
 Repair (each stage at most once): fix app.py if it crashes on load; fix the
 modules used by failing tests; only then, if tests still fail, fix the tests.
@@ -193,7 +193,15 @@ async def run_pipeline_steps(requirements: str) -> AsyncIterator[dict]:
                 test_result = await call_tool(session, "run_tests", run_id=run_id)
                 yield log(f"After test repair - {status()}")
 
-            # 7. Collect outputs and usage for display
+            # 7. Requirement-to-test traceability after any test repairs.
+            coverage = await call_tool(session, "validate_requirements", run_id=run_id)
+            yield log(
+                "Requirements traceability: "
+                f"{coverage['declared_requirements']}/{coverage['total_requirements']} "
+                "requirements have declared test mappings (not proof of correctness)."
+            )
+
+            # 8. Collect outputs and usage for display
             files = {
                 name: await call_tool(session, "read_file", run_id=run_id, filename=name)
                 for name in filenames + [tests["filename"]]
@@ -218,6 +226,7 @@ async def run_pipeline_steps(requirements: str) -> AsyncIterator[dict]:
                     "app_check": app_result,
                     "repaired": repaired,
                     "usage": usage,
+                    "coverage": coverage,
                     "success": test_result["ok"] and app_result["ok"],
                 },
             }

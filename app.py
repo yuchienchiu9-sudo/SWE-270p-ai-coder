@@ -97,6 +97,7 @@ async def generate(description: str, requirements: str):
             updates.get("tests", empty),
             updates.get("pytest", empty),
             updates.get("usage", empty),
+            updates.get("coverage", empty),
             updates.get("download", empty),
             updates.get("result", empty),
         )
@@ -135,6 +136,7 @@ async def generate(description: str, requirements: str):
                 tests=result["files"][result["test_file"]],
                 pytest=pytest_text,
                 usage=usage_rows(result["usage"]),
+                coverage=result["coverage"],
                 download=zip_run(result["path"]),
                 result=result,
             )
@@ -209,6 +211,13 @@ with gr.Blocks(title="AI Coder") as demo:
         with gr.Tab("LLM usage"):
             usage_table = gr.Dataframe(headers=USAGE_HEADERS, label="API calls and tokens",
                                        interactive=False)
+        with gr.Tab("Requirements coverage"):
+            gr.Markdown(
+                "**Declared test mappings only.** A tag such as FR3 means a test "
+                "claims relevance; it does not prove the requirement is satisfied. "
+                "Unmapped UI requirements may still be exercised by app checks."
+            )
+            coverage_view = gr.JSON(label="Requirements-to-test traceability")
         with gr.Tab("Run the app"):
             download_file = gr.File(label="Download generated application (.zip)")
             launch_btn = gr.Button("Launch generated app")
@@ -219,7 +228,7 @@ with gr.Blocks(title="AI Coder") as demo:
         generate,
         inputs=[description_in, requirements_in],
         outputs=[log_box, status_md, plan_view, file_selector, code_view, tests_view,
-                 pytest_view, usage_table, download_file, result_state],
+                 pytest_view, usage_table, coverage_view, download_file, result_state],
     )
     file_selector.change(show_file, inputs=[file_selector, result_state], outputs=code_view)
     launch_btn.click(launch_app, inputs=result_state, outputs=launch_md)

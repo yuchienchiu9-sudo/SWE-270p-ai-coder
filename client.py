@@ -33,6 +33,8 @@ from typing import AsyncIterator
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import get_default_environment, stdio_client
 
+from execution_trace import ExecutionTrace
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 SERVER_PATH = PROJECT_ROOT / "mcp_server.py"
 DEFAULT_REQUIREMENTS = PROJECT_ROOT / "examples" / "quickdelivery.md"
@@ -109,9 +111,15 @@ async def run_pipeline_steps(requirements: str) -> AsyncIterator[dict]:
         cwd=str(PROJECT_ROOT),
     )
 
+    trace = ExecutionTrace()  # Never shared between concurrent user runs.
+
     def log(message: str) -> dict:
-        """Build a log event."""
-        return {"type": "log", "message": message}
+        """Build a log event with a current trace snapshot for the UI."""
+        return {"type": "log", "message": message, "trace": trace.to_dict()}
+
+    async def traced_call(session: ClientSession, name: str, **arguments):
+        """Instrument the existing MCP tool wrapper without changing tool behavior."""
+        return await trace.call(call_tool, session, name, **arguments)
 
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -120,13 +128,14 @@ async def run_pipeline_steps(requirements: str) -> AsyncIterator[dict]:
             yield log(f"Connected to MCP server ({len(tools.tools)} tools).")
 
             # 1. Workspace
-            run = await call_tool(session, "create_run", requirements=requirements)
+            run = await traced_call(session, "create_run", requirements=requirements)
             run_id = run["run_id"]
+            trace.set_run_folder(run["path"])
             yield log(f"Created workspace {run_id}")
 
             # 2. Planner Agent
             yield log("Planner Agent: designing the application...")
-            planned = await call_tool(session, "plan", run_id=run_id)
+            planned = await traced_call(session, "plan", run_id=run_id)
             plan = planned["plan"]
             filenames = [f["filename"] for f in plan["files"]]
             yield log(f"Planner Agent: {len(filenames)} files -> {', '.join(filenames)}")
@@ -134,17 +143,17 @@ async def run_pipeline_steps(requirements: str) -> AsyncIterator[dict]:
             # 3. Coder Agent, one file at a time in dependency order
             for name in filenames:
                 yield log(f"Coder Agent: writing {name}...")
-                written = await call_tool(session, "write_code", run_id=run_id, filename=name)
+                written = await traced_call(session, "write_code", run_id=run_id, filename=name)
                 yield log(f"Coder Agent: {name} done ({written['lines']} lines)")
 
             # 4. Tester Agent
             yield log("Tester Agent: writing tests...")
-            tests = await call_tool(session, "write_tests", run_id=run_id)
+            tests = await traced_call(session, "write_tests", run_id=run_id)
             yield log(f"Tester Agent: {tests['filename']} done ({tests['tests']} tests)")
 
             # 5. Verify: pytest + headless Streamlit check
-            test_result = await call_tool(session, "run_tests", run_id=run_id)
-            app_result = await call_tool(session, "check_app", run_id=run_id)
+            test_result = await traced_call(session, "run_tests", run_id=run_id)
+            app_result = await traced_call(session, "check_app", run_id=run_id)
             yield log(
                 f"pytest: {test_result['passed']} passed, {test_result['failed']} failed; "
                 f"app check: {'OK' if app_result['ok'] else 'FAILED'}"
@@ -164,37 +173,37 @@ async def run_pipeline_steps(requirements: str) -> AsyncIterator[dict]:
 
             if not app_result["ok"]:
                 yield log("Repair: Coder Agent fixing app.py startup error...")
-                await call_tool(session, "write_code", run_id=run_id, filename="app.py",
+                await traced_call(session, "write_code", run_id=run_id, filename="app.py",
                                 feedback="\n".join(app_result["exceptions"])[-4000:])
                 repaired.append("app.py")
-                app_result = await call_tool(session, "check_app", run_id=run_id)
+                app_result = await traced_call(session, "check_app", run_id=run_id)
                 yield log(f"After app repair - {status()}")
 
             if not test_result["ok"]:
-                test_code = await call_tool(session, "read_file", run_id=run_id,
+                test_code = await traced_call(session, "read_file", run_id=run_id,
                                             filename=tests["filename"])
                 logic_files = [n for n in filenames if n != "app.py"]
                 suspects = modules_to_repair(test_result["output"], test_code, logic_files)
                 for name in suspects:
                     yield log(f"Repair: Coder Agent checking {name} against failing tests...")
-                    await call_tool(session, "write_code", run_id=run_id, filename=name,
+                    await traced_call(session, "write_code", run_id=run_id, filename=name,
                                     feedback=test_result["output"][-4000:])
                     repaired.append(name)
                 if suspects:
-                    test_result = await call_tool(session, "run_tests", run_id=run_id)
-                    app_result = await call_tool(session, "check_app", run_id=run_id)
+                    test_result = await traced_call(session, "run_tests", run_id=run_id)
+                    app_result = await traced_call(session, "check_app", run_id=run_id)
                     yield log(f"After code repair - {status()}")
 
             if not test_result["ok"]:
                 yield log("Repair: Tester Agent fixing tests that contradict the code...")
-                await call_tool(session, "write_tests", run_id=run_id,
+                await traced_call(session, "write_tests", run_id=run_id,
                                 feedback=test_result["output"][-4000:])
                 repaired.append(tests["filename"])
-                test_result = await call_tool(session, "run_tests", run_id=run_id)
+                test_result = await traced_call(session, "run_tests", run_id=run_id)
                 yield log(f"After test repair - {status()}")
 
             # 7. Requirement-to-test traceability after any test repairs.
-            coverage = await call_tool(session, "validate_requirements", run_id=run_id)
+            coverage = await traced_call(session, "validate_requirements", run_id=run_id)
             yield log(
                 "Requirements traceability: "
                 f"{coverage['declared_requirements']}/{coverage['total_requirements']} "
@@ -203,10 +212,10 @@ async def run_pipeline_steps(requirements: str) -> AsyncIterator[dict]:
 
             # 8. Collect outputs and usage for display
             files = {
-                name: await call_tool(session, "read_file", run_id=run_id, filename=name)
+                name: await traced_call(session, "read_file", run_id=run_id, filename=name)
                 for name in filenames + [tests["filename"]]
             }
-            usage = await call_tool(session, "get_usage", run_id=run_id)
+            usage = await traced_call(session, "get_usage", run_id=run_id)
             total = usage["total"]
             yield log(
                 f"LLM usage: {total['api_calls']} API calls, "
@@ -227,6 +236,7 @@ async def run_pipeline_steps(requirements: str) -> AsyncIterator[dict]:
                     "repaired": repaired,
                     "usage": usage,
                     "coverage": coverage,
+                    "execution_trace": trace.to_dict(),
                     "success": test_result["ok"] and app_result["ok"],
                 },
             }

@@ -76,6 +76,32 @@ def error_message(exc: BaseException) -> str:
 # ---------- event handlers ----------
 
 USAGE_HEADERS = ["Agent", "API calls", "Input tokens", "Output tokens", "Total tokens"]
+TRACE_HEADERS = ["#", "MCP tool", "File / Run", "MCP status", "Tool result", "Duration (ms)", "Started (UTC)"]
+
+
+def trace_rows(trace: dict) -> list[list]:
+    """Flatten the per-run trace into an easy-to-review tool-call table."""
+    rows = []
+    for event in trace.get("events", []):
+        metadata = event.get("metadata", {})
+        target = metadata.get("filename") or metadata.get("run_id", "")
+        tool_result = event.get("result_ok")
+        rows.append([
+            event["sequence"], event["tool"], target, event["status"],
+            "N/A" if tool_result is None else ("OK" if tool_result else "FAILED"),
+            event["duration_ms"], event["started_at"],
+        ])
+    return rows
+
+
+def trace_summary(trace: dict) -> str:
+    """Summarize MCP-level outcomes (not the generated app's pytest pass rate)."""
+    stats = trace.get("summary", {})
+    return (
+        f"**MCP calls:** {stats.get('total_calls', 0)} · "
+        f"**MCP errors:** {stats.get('failed_calls', 0)} · "
+        f"**Total tool-call time:** {stats.get('duration_ms', 0) / 1000:.2f}s"
+    )
 
 
 async def generate(description: str, requirements: str):
@@ -98,16 +124,30 @@ async def generate(description: str, requirements: str):
             updates.get("pytest", empty),
             updates.get("usage", empty),
             updates.get("coverage", empty),
+            updates.get("trace_summary", empty),
+            updates.get("trace_table", empty),
+            updates.get("trace_json", empty),
             updates.get("download", empty),
             updates.get("result", empty),
         )
 
-    yield ui("**Running...** the agents are working.")
+    yield ui(
+        "**Running...** the agents are working.",
+        trace_summary="**MCP calls:** 0 · **MCP errors:** 0 · **Total tool-call time:** 0.00s",
+        trace_table=[], trace_json={},
+    )
     try:
         async for event in run_pipeline_steps(build_spec(description, requirements)):
             if event["type"] == "log":
                 log_lines.append(event["message"])
-                yield ui("**Running...** the agents are working.")
+                trace = event.get("trace", {})
+                yield ui(
+                    "**Running...** the agents are working.",
+                    trace_summary=trace_summary(trace),
+                    trace_table=trace_rows(trace),
+                    # Keep the expanding JSON tree stable while streaming.
+                    # The full trace is populated in the final result update.
+                )
                 continue
 
             result = event["result"]
@@ -137,6 +177,9 @@ async def generate(description: str, requirements: str):
                 pytest=pytest_text,
                 usage=usage_rows(result["usage"]),
                 coverage=result["coverage"],
+                trace_summary=trace_summary(result["execution_trace"]),
+                trace_table=trace_rows(result["execution_trace"]),
+                trace_json=result["execution_trace"],
                 download=zip_run(result["path"]),
                 result=result,
             )
@@ -218,6 +261,18 @@ with gr.Blocks(title="AI Coder") as demo:
                 "Unmapped UI requirements may still be exercised by app checks."
             )
             coverage_view = gr.JSON(label="Requirements-to-test traceability")
+        with gr.Tab("MCP execution trace"):
+            gr.Markdown(
+                "MCP client-side tool calls, including repairs and failures. "
+                "A successful MCP call can still return a failed pytest/app check. "
+                "Only safe identifiers are logged; prompts and tool results are omitted."
+            )
+            trace_summary_md = gr.Markdown("Generate an app to see MCP calls.")
+            trace_table_view = gr.Dataframe(
+                headers=TRACE_HEADERS, label="MCP tool calls", interactive=False
+            )
+            gr.Markdown("The complete JSON appears after generation finishes; the table above updates live.")
+            trace_json_view = gr.JSON(label="Execution trace (saved as execution_trace.json)")
         with gr.Tab("Run the app"):
             download_file = gr.File(label="Download generated application (.zip)")
             launch_btn = gr.Button("Launch generated app")
@@ -228,7 +283,8 @@ with gr.Blocks(title="AI Coder") as demo:
         generate,
         inputs=[description_in, requirements_in],
         outputs=[log_box, status_md, plan_view, file_selector, code_view, tests_view,
-                 pytest_view, usage_table, coverage_view, download_file, result_state],
+                 pytest_view, usage_table, coverage_view, trace_summary_md,
+                 trace_table_view, trace_json_view, download_file, result_state],
     )
     file_selector.change(show_file, inputs=[file_selector, result_state], outputs=code_view)
     launch_btn.click(launch_app, inputs=result_state, outputs=launch_md)

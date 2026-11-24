@@ -7,7 +7,7 @@ generates a complete **Python + Streamlit application with pytest tests**.
 Three agents (Planner, Coder, Tester) work behind an **MCP server**, and an MCP
 client coordinates them. The system runs the generated tests, checks that the
 app starts, repairs failures, reports **requirements-to-test traceability**,
-and tracks **LLM usage (API calls and tokens)**.
+tracks **LLM usage (API calls and tokens)**, and records **MCP tool execution traces**.
 
 Our selected application is **QuickDelivery**, a simplified food delivery app.
 QuickDelivery is the *output* of AI Coder; its requirements are in
@@ -39,7 +39,7 @@ In the UI:
 1. Click **Load QuickDelivery example** (or type your own description and requirements).
 2. Click **Generate**. Agent progress streams live (about 1–2 minutes).
 3. Inspect the tabs: **Generated code**, **Generated tests**, **Test results**,
-   **Plan**, **LLM usage**, **Requirements coverage**.
+   **Plan**, **LLM usage**, **Requirements coverage**, **MCP execution trace**.
 4. In **Run the app**, download the zip or click **Launch generated app**
    (opens the generated app at http://localhost:8502).
 
@@ -181,6 +181,27 @@ Ways the design keeps usage low:
 
 ---
 
+## MCP execution tracing
+
+The MCP client wraps tool calls with `ExecutionTrace` (in
+[`execution_trace.py`](execution_trace.py)). Each call records its tool name,
+execution order, UTC start time, duration, call status, and safe identifiers
+(`run_id` and `filename` when available). The trace distinguishes a successful
+MCP call from a failed tool-level check: for example, `run_tests` can complete
+successfully but report `result_ok: false` when pytest fails.
+
+A fresh recorder is created per generation run to keep event histories separate.
+Completed events are saved incrementally to `execution_trace.json` inside that
+run's `generated/run_<timestamp>/` directory. Only selected metadata is stored;
+requirements, prompts, feedback, secrets, and tool response contents are not
+included. Tracing does **not** make additional Gemini API calls.
+
+The Gradio **MCP execution trace** tab shows a live call summary and event
+table. The complete JSON trace is displayed after generation finishes to
+avoid unnecessary UI re-rendering.
+
+---
+
 ## Reliability
 
 | Problem | Handling |
@@ -245,6 +266,7 @@ passes all 15 of its tests (`cd examples/sample_output && pytest test_app.py`).
 ```
 app.py                 Gradio UI (entry point)
 client.py              MCP client: pipeline, repair, CLI
+execution_trace.py     Client-side MCP tool-call tracing and JSON persistence
 mcp_server.py          MCP server: agent, workspace, verification and usage tools
 llm.py                 Gemini client: retries, JSON/text replies, usage counting
 agents/
@@ -258,9 +280,10 @@ examples/
   sample_output/       One generated QuickDelivery app with tests and usage
 requirements.txt       Python dependencies
 .env.example           Template for the API key
-generated/             Output of each run, including coverage_report.json (git-ignored)
+generated/             Per-run output, including coverage_report.json and execution_trace.json (git-ignored)
 tests/
   test_requirements_validator.py  Unit tests for coverage analysis
+  test_execution_trace.py         Unit tests for MCP tracing
 ```
 
 ---

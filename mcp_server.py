@@ -36,6 +36,7 @@ from agents.planner import planner_agent
 from agents.tester import tester_agent
 from agents.validation import FILENAME_PATTERN, TEST_FILENAME
 from llm import Usage
+from sandbox_runner import SandboxUnavailable, run_generated_python
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 OUTPUT_ROOT = Path(os.getenv("AI_CODER_OUTPUT_DIR", PROJECT_ROOT / "generated")).resolve()
@@ -143,16 +144,8 @@ def _safe_env() -> dict:
 
 
 def _run_python(run: Path, args: list[str]) -> subprocess.CompletedProcess:
-    """Run Python in the run folder with a timeout and no secrets in the env."""
-    return subprocess.run(
-        [sys.executable, *args],
-        cwd=run,
-        env=_safe_env(),
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=TEST_TIMEOUT_S,
-    )
+    """Execute generated Python in a Docker sandbox (fail closed)."""
+    return run_generated_python(run, args, timeout=TEST_TIMEOUT_S)
 
 
 # ---------- workspace tools ----------
@@ -264,6 +257,8 @@ def run_tests(run_id: str) -> dict:
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "passed": 0, "failed": 0, "output": "Timed out."}
+    except SandboxUnavailable as exc:
+        return {"ok": False, "passed": 0, "failed": 0, "output": str(exc), "sandbox_error": True}
 
     output = (result.stdout + "\n" + result.stderr).strip()
 
@@ -301,6 +296,8 @@ def check_app(run_id: str) -> dict:
         result = _run_python(run, ["-W", "ignore", "-c", APP_CHECK_SCRIPT])
     except subprocess.TimeoutExpired:
         return {"ok": False, "exceptions": ["Timed out."]}
+    except SandboxUnavailable as exc:
+        return {"ok": False, "exceptions": [str(exc)], "sandbox_error": True}
 
     lines = result.stdout.strip().splitlines()
     if result.returncode != 0 or not lines:

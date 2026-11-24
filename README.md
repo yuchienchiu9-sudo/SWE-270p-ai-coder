@@ -18,7 +18,7 @@ is in [examples/sample_output/](examples/sample_output/).
 
 ## Quick start
 
-Requirements: Python 3.12 and a Gemini API key.
+Requirements: Python 3.12, a Gemini API key, and Docker Desktop (running) for sandboxed verification.
 
 ```bash
 # 1. Create the environment (conda shown; venv works too)
@@ -30,7 +30,10 @@ pip install -r requirements.txt
 copy .env.example .env        # macOS/Linux: cp .env.example .env
 #    then edit .env and set GEMINI_API_KEY
 
-# 3. Start the UI (opens http://127.0.0.1:7860)
+# 3. Build the sandbox image once (and after changes to Dockerfile.sandbox)
+docker build -f Dockerfile.sandbox -t ai-coder-test-sandbox:local .
+
+# 4. Start the UI (opens http://127.0.0.1:7860)
 python app.py
 ```
 
@@ -51,7 +54,8 @@ python client.py my_requirements.md     # any requirements file
 ```
 
 Each run is saved to `generated/run_<timestamp>/`. To run a generated app
-yourself, start Streamlit **from inside that folder** so its theme loads:
+yourself, start Streamlit **from inside that folder** so its theme loads.
+**These manual commands run on your host, outside the sandbox; only run trusted code:**
 
 ```bash
 cd generated/run_<timestamp>
@@ -99,7 +103,8 @@ it**. The next agent picks that output up from the server:
 3. **Coder** (`write_code`, once per file) reads `plan.json` plus only the files
    that file depends on, and writes one source file.
 4. **Tester** (`write_tests`) reads `plan.json` and all source files, and writes `test_app.py`.
-5. `run_tests` and `check_app` verify the result; failures are routed back to an agent.
+5. `run_tests` and `check_app` verify the result in short-lived Docker
+   containers; failures are routed back to an agent.
 6. `validate_requirements` maps numbered functional requirements (FR1, FR2, etc.)
    to generated pytest tests using docstring annotations. It runs after any
    repairs and saves `coverage_report.json`.
@@ -202,6 +207,64 @@ avoid unnecessary UI re-rendering.
 
 ---
 
+## Sandboxed test and app verification
+
+Generated code is executed during verification. By default, both MCP tools,
+`run_tests` (pytest on `test_app.py`) and `check_app` (headless Streamlit
+`AppTest` on `app.py`), use [`sandbox_runner.py`](sandbox_runner.py) to start
+**separate, short-lived Docker containers**. The Planner, Coder, Tester, Gemini
+API calls, and Gradio UI continue running outside the containers. Sandbox
+execution does **not** require additional Gemini calls.
+
+Build the preinstalled verification environment before generating apps:
+
+```bash
+docker build -f Dockerfile.sandbox -t ai-coder-test-sandbox:local .
+```
+
+The image, defined in [`Dockerfile.sandbox`](Dockerfile.sandbox), includes
+Python 3.12, pytest, and Streamlit. Dependencies are installed **at image
+build time**, not during code execution. Each container bind-mounts only the
+current generated run folder, **read-only**, at `/workspace`:
+
+```text
+Mac host: generated/run_<timestamp>/    Container: /workspace/
+          models.py                                 models.py
+          cart.py                                   cart.py
+          app.py                                    app.py
+          test_app.py                               test_app.py
+```
+
+The example filenames are illustrative; generated files differ by run. A bind
+mount does not copy the app into the image. The container runs the mounted
+code and returns the exit code, stdout, and stderr to the MCP server. Containers
+are removed after execution (`docker run --rm`); the image and generated files
+remain. Test repairs use a new container with the updated generated files.
+
+| `AI_CODER_RUNNER` | Behavior |
+|---|---|
+| Unset (default) or `docker` | Run verification inside Docker; require Docker Desktop and the built image |
+| `host` | Explicit developer-only fallback; runs generated Python directly on the host (**not sandboxed**) |
+| Any other value | Raise `SandboxUnavailable` |
+
+The Docker runner uses `--network=none`, `--read-only`, a read-only bind mount,
+`--memory=512m`, `--cpus=1`, `--pids-limit=64`, `--cap-drop=ALL`, a non-root
+user, and a 60-second execution timeout. If Docker is unavailable it **fails
+closed** rather than silently running on the host. These controls reduce risk,
+but containers are not a complete security boundary for malicious code.
+
+Verify the runner's behavior without Docker or Gemini:
+
+```bash
+python -m pytest tests/test_sandbox_runner.py -v
+```
+
+**Scope:** This sandbox is used by `run_tests` and `check_app` only. The
+**Launch generated app** button and manually running `streamlit run app.py`
+are **not sandboxed** and must only be used for trusted generated code.
+
+---
+
 ## Reliability
 
 | Problem | Handling |
@@ -266,6 +329,8 @@ passes all 15 of its tests (`cd examples/sample_output && pytest test_app.py`).
 ```
 app.py                 Gradio UI (entry point)
 client.py              MCP client: pipeline, repair, CLI
+sandbox_runner.py      Docker execution for generated-code verification
+Dockerfile.sandbox     Image with Python, pytest and Streamlit
 execution_trace.py     Client-side MCP tool-call tracing and JSON persistence
 mcp_server.py          MCP server: agent, workspace, verification and usage tools
 llm.py                 Gemini client: retries, JSON/text replies, usage counting
@@ -284,17 +349,18 @@ generated/             Per-run output, including coverage_report.json and execut
 tests/
   test_requirements_validator.py  Unit tests for coverage analysis
   test_execution_trace.py         Unit tests for MCP tracing
+  test_sandbox_runner.py          Unit tests for Docker runner configuration and failures
 ```
 
 ---
 
 ## Security notes and limitations
 
-- **Generated code is executed** (pytest, `check_app`, Launch button). It runs in
-  its own process with a 60-second timeout (tests and app check) and with API
-  keys and other secrets removed from its environment variables. It is **not
-  sandboxed**: generated code could still read files on disk, such as `.env`.
-  Use a container if you run untrusted requirements.
+- **Generated code is executed.** `run_tests` and `check_app` use restricted
+  Docker containers by default (60-second timeout, no API key passed into the
+  container). Container isolation reduces risk but is not a security guarantee.
+  The **Launch generated app** button and manual Streamlit execution still run
+  outside this sandbox. `AI_CODER_RUNNER=host` explicitly disables isolation.
 - MCP tools only accept run IDs of the form `run_YYYYMMDD_HHMMSS` and flat file
   names, so paths like `../../.env` are rejected.
 - The API key lives in `.env`, which is git-ignored and never committed.

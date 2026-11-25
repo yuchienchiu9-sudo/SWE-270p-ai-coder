@@ -1,0 +1,10 @@
+# Trusted AI Coder worker (NOT the generated-code sandbox).
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY requirements.worker.txt .
+RUN pip install --no-cache-dir -r requirements.worker.txt
+COPY agents/ agents/
+COPY client.py mcp_server.py llm.py execution_trace.py sandbox_runner.py project_dependencies.py batch_rpc.py job_worker.py ./
+USER 65534:65534
+CMD ["python", "-u", "job_worker.py"]

@@ -221,26 +221,45 @@ and token usage. The worker coordinates verification, but **generated Python
 executes only in a separate restricted test sandbox**, not inside the worker.
 
 ```text
-Mac host: Gradio (app.py) → BatchManager (batch_manager.py)
-                             │ docker run ai-coder-worker:local
-                             ▼
-Worker container A           Worker container B           Worker container C
-  client.py + MCP server       independent pipeline        independent pipeline
-  Planner / Coder / Tester
-  /job → host batch_runs/job_<id>/  (read-write bind mount)
-          │
-          └── run_tests / check_app → file-based broker (batch_rpc.py)
-                                        │ host runs Docker
-                                        ▼
-                                    Test sandbox A
-                                      no API key / no network
-                                      read-only generated code
-                                      pytest / Streamlit AppTest
+Mac host: Gradio (app.py) -> BatchManager (batch_manager.py)
+    |
+    +-- docker run ai-coder-worker:local --> Worker A (QuickDelivery)
+    |       MCP client (client.py) <--stdio--> MCP server (mcp_server.py)
+    |       Planner -> Coder -> Tester -> llm.py --HTTPS/bridge--> Gemini API
+    |       /job <--> batch_runs/job_<A>/ (read-write bind mount)
+    |       workspace / trace / usage / worker.log
+    |         |
+    |         +-- run_tests / check_app --> batch_rpc.py
+    |                                          | JSON request in /job/control/
+    |                                          v
+    |                                   Host verification broker
+    |                                          | approved docker run
+    |                                          v
+    |                                   Test sandbox A
+    |                                     - no Gemini key or network
+    |                                     - read-only generated source
+    |                                     - pytest / Streamlit AppTest
+    |
+    +-- docker run ai-coder-worker:local --> Worker B (BudgetMaster)
+    |       independent MCP pipeline / workspace / trace / usage
+    |       +-- file RPC --> Host broker --> Test sandbox B
+    |
+    +-- docker run ai-coder-worker:local --> Worker C (GroupChat)
+            independent MCP pipeline / workspace / trace / usage
+            +-- file RPC --> Host broker --> Test sandbox C
 ```
 
-**Worker startup:** `batch_manager.py` launches `docker run`; the worker image's
-`CMD` starts `python -u job_worker.py`, which calls `client.py`'s
-`run_pipeline_steps()` to drive MCP tools in order.
+**Worker startup (entry point):** Each worker image starts the same Python
+pipeline inside its own container:
+
+```text
+batch_manager.py
+    -> docker run ai-coder-worker:local
+    -> Dockerfile.worker CMD
+    -> python -u job_worker.py
+    -> client.run_pipeline_steps()
+    -> MCP Client/Server + Planner/Coder/Tester
+```
 
 **LLM connection:** inside each worker, the MCP client talks to its MCP server
 via **stdio** (no network required). The server's agents call `llm.py`, which

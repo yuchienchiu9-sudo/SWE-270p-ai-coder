@@ -30,8 +30,9 @@ pip install -r requirements.txt
 copy .env.example .env        # macOS/Linux: cp .env.example .env
 #    then edit .env and set GEMINI_API_KEY
 
-# 3. Build the sandbox image once (and after changes to Dockerfile.sandbox)
+# 3. Build the verification sandbox and concurrent worker images
 docker build -f Dockerfile.sandbox -t ai-coder-test-sandbox:local .
+docker build -f Dockerfile.worker -t ai-coder-worker:local .
 
 # 4. Start the UI (opens http://127.0.0.1:7860)
 python app.py
@@ -45,6 +46,11 @@ In the UI:
    **Plan**, **LLM usage**, **Requirements coverage**, **MCP execution trace**.
 4. In **Run the app**, download the zip or click **Launch generated app**
    (opens the generated app at http://localhost:8502).
+
+For parallel generation, open **Concurrent jobs (demo)**, choose 1–3 demo
+projects, and click **Generate selected projects concurrently**. Track each
+job's progress and inspect its trace, usage, and logs. **Current batch** shows
+the latest batch; **All jobs** shows history from the running server process.
 
 Command-line alternative (same pipeline, no UI):
 
@@ -207,14 +213,93 @@ avoid unnecessary UI re-rendering.
 
 ---
 
+## Concurrent containerized generation
+
+Each demo project runs its own **trusted worker container** with an independent
+MCP client/server session, Planner → Coder → Tester pipeline, workspace, trace,
+and token usage. The worker coordinates verification, but **generated Python
+executes only in a separate restricted test sandbox**, not inside the worker.
+
+```text
+Mac host: Gradio (app.py) -> BatchManager (batch_manager.py)
+    |
+    +-- docker run ai-coder-worker:local --> Worker A (QuickDelivery)
+    |       MCP client (client.py) <--stdio--> MCP server (mcp_server.py)
+    |       Planner -> Coder -> Tester -> llm.py --HTTPS/bridge--> Gemini API
+    |       /job <--> batch_runs/job_<A>/ (read-write bind mount)
+    |       workspace / trace / usage / worker.log
+    |         |
+    |         +-- run_tests / check_app --> batch_rpc.py
+    |                                          | JSON request in /job/control/
+    |                                          v
+    |                                   Host verification broker
+    |                                          | approved docker run
+    |                                          v
+    |                                   Test sandbox A
+    |                                     - no Gemini key or network
+    |                                     - read-only generated source
+    |                                     - pytest / Streamlit AppTest
+    |
+    +-- docker run ai-coder-worker:local --> Worker B (BudgetMaster)
+    |       independent MCP pipeline / workspace / trace / usage
+    |       +-- file RPC --> Host broker --> Test sandbox B
+    |
+    +-- docker run ai-coder-worker:local --> Worker C (GroupChat)
+            independent MCP pipeline / workspace / trace / usage
+            +-- file RPC --> Host broker --> Test sandbox C
+```
+
+**Worker startup (entry point):** Each worker image starts the same Python
+pipeline inside its own container:
+
+```text
+batch_manager.py
+    -> docker run ai-coder-worker:local
+    -> Dockerfile.worker CMD
+    -> python -u job_worker.py
+    -> client.run_pipeline_steps()
+    -> MCP Client/Server + Planner/Coder/Tester
+```
+
+**LLM connection:** inside each worker, the MCP client talks to its MCP server
+via **stdio** (no network required). The server's agents call `llm.py`, which
+sends HTTPS requests through the worker's Docker **bridge network** and host
+network/NAT to the **cloud-hosted Gemini API**. `GEMINI_API_KEY` is passed to
+the trusted worker, **never to the test sandbox**. Workers share API rate limits
+but do not share MCP sessions or LLM conversation state.
+
+```text
+batch_runs/                         # git-ignored
+├── job_<unique-id-A>/
+│   ├── spec.md
+│   ├── progress.json
+│   ├── worker.log
+│   ├── control/                  # broker requests / responses
+│   └── generated/
+│       └── run_<timestamp>/
+│           ├── app.py
+│           ├── test_app.py
+│           ├── requirements.txt
+│           ├── execution_trace.json
+│           └── usage.json
+├── job_<unique-id-B>/
+└── job_<unique-id-C>/
+```
+
+The job folders persist on disk, but the dashboard's job index lives in memory
+and is not automatically restored after restarting the Gradio server.
+
+---
+
 ## Sandboxed test and app verification
 
 Generated code is executed during verification. By default, both MCP tools,
 `run_tests` (pytest on `test_app.py`) and `check_app` (headless Streamlit
 `AppTest` on `app.py`), use [`sandbox_runner.py`](sandbox_runner.py) to start
-**separate, short-lived Docker containers**. The Planner, Coder, Tester, Gemini
-API calls, and Gradio UI continue running outside the containers. Sandbox
-execution does **not** require additional Gemini calls.
+**separate, short-lived Docker containers**. In single-run mode, the agents
+run on the host; in concurrent mode, they run inside trusted worker containers.
+The Gradio UI remains on the host. Neither mode runs the agents or calls Gemini
+inside the **test sandbox**; verification makes no additional Gemini calls.
 
 Build the preinstalled verification environment before generating apps:
 
@@ -222,9 +307,15 @@ Build the preinstalled verification environment before generating apps:
 docker build -f Dockerfile.sandbox -t ai-coder-test-sandbox:local .
 ```
 
-The image, defined in [`Dockerfile.sandbox`](Dockerfile.sandbox), includes
-Python 3.12, pytest, and Streamlit. Dependencies are installed **at image
-build time**, not during code execution. Each container bind-mounts only the
+The base image, defined in [`Dockerfile.sandbox`](Dockerfile.sandbox), includes
+Python 3.12, pytest, and Streamlit. For extra project dependencies, the Planner
+writes `requirements.txt`; [`project_dependencies.py`](project_dependencies.py)
+resolves only **approved packages at pinned versions**. The host's
+`sandbox_runner.py` reuses an existing image for that dependency set, or builds
+a new tagged image with `EXTRA_PACKAGES` if missing. Dependency installation
+happens **at image build time** (with network access), never when generated
+code executes. Projects without extras use `ai-coder-test-sandbox:local`.
+Each test container bind-mounts only the
 current generated run folder, **read-only**, at `/workspace`:
 
 ```text
@@ -236,8 +327,10 @@ Mac host: generated/run_<timestamp>/    Container: /workspace/
 ```
 
 The example filenames are illustrative; generated files differ by run. A bind
-mount does not copy the app into the image. The container runs the mounted
-code and returns the exit code, stdout, and stderr to the MCP server. Containers
+mount does not copy the app into the image. In concurrent mode, the worker
+requests verification through a **file-based host broker** (`batch_rpc.py`),
+without access to the host Docker socket. The test container runs mounted code;
+its exit code, stdout, and stderr are returned to the MCP server. Containers
 are removed after execution (`docker run --rm`); the image and generated files
 remain. Test repairs use a new container with the updated generated files.
 
@@ -326,30 +419,36 @@ passes all 15 of its tests (`cd examples/sample_output && pytest test_app.py`).
 
 ## Project structure
 
-```
-app.py                 Gradio UI (entry point)
-client.py              MCP client: pipeline, repair, CLI
-sandbox_runner.py      Docker execution for generated-code verification
-Dockerfile.sandbox     Image with Python, pytest and Streamlit
-execution_trace.py     Client-side MCP tool-call tracing and JSON persistence
-mcp_server.py          MCP server: agent, workspace, verification and usage tools
-llm.py                 Gemini client: retries, JSON/text replies, usage counting
+```text
+app.py                   Gradio UI (single-run + concurrent demo)
+client.py                MCP client: orchestration, repair, CLI
+mcp_server.py            MCP server: agents, workspace, verification, usage
+llm.py                   Gemini calls, retries, and token usage
+execution_trace.py       MCP tool-call tracing and persistence
+batch_manager.py         Concurrent job lifecycle and host verification broker
+job_worker.py            Docker worker entry point
+batch_rpc.py              File-based worker ↔ host verification requests
+sandbox_runner.py        Restricted Docker test execution
+project_dependencies.py  Approved, pinned project dependencies / image tags
+Dockerfile.worker        Trusted worker image (Gemini network access)
+requirements.worker.txt  Worker Python dependencies
+Dockerfile.sandbox       Keyless test image (pytest / Streamlit / approved extras)
+.dockerignore            Excludes local files from Docker build context
 agents/
-  planner.py           Planner Agent
-  coder.py             Coder Agent (incl. UI guidelines for generated apps)
-  tester.py            Tester Agent
-  validation.py        Syntax and import checks shared by the agents
-  requirements_validator.py  FR-to-test annotation analyzer (no LLM call)
+  planner.py             Planner Agent
+  coder.py               Coder Agent
+  tester.py              Tester Agent
+  validation.py          Syntax/import validation
+  requirements_validator.py  Functional requirement-to-test mapping
 examples/
-  quickdelivery.md     Our QuickDelivery requirements
-  sample_output/       One generated QuickDelivery app with tests and usage
-requirements.txt       Python dependencies
-.env.example           Template for the API key
-generated/             Per-run output, including coverage_report.json and execution_trace.json (git-ignored)
-tests/
-  test_requirements_validator.py  Unit tests for coverage analysis
-  test_execution_trace.py         Unit tests for MCP tracing
-  test_sandbox_runner.py          Unit tests for Docker runner configuration and failures
+  quickdelivery.md       Canonical QuickDelivery requirements
+  demo_specs/            BudgetMaster and GroupChat demo requirements
+  sample_output/         Reference generated output
+requirements.txt         Host Python dependencies
+.env.example             API key configuration template
+generated/               Single-run outputs (git-ignored)
+batch_runs/              Per-job generated outputs, logs and traces (git-ignored)
+tests/                   Validator, tracing, sandbox, dependencies and batch tests
 ```
 
 ---

@@ -38,7 +38,7 @@ from execution_trace import ExecutionTrace
 PROJECT_ROOT = Path(__file__).resolve().parent
 SERVER_PATH = PROJECT_ROOT / "mcp_server.py"
 DEFAULT_REQUIREMENTS = PROJECT_ROOT / "examples" / "quickdelivery.md"
-PASSTHROUGH_ENV = ("AI_CODER_OUTPUT_DIR", "GEMINI_MODEL")
+PASSTHROUGH_ENV = ("AI_CODER_OUTPUT_DIR", "GEMINI_MODEL", "AI_CODER_BROKER_DIR", "GEMINI_API_KEY")
 
 
 class PipelineError(RuntimeError):
@@ -172,12 +172,20 @@ async def run_pipeline_steps(requirements: str) -> AsyncIterator[dict]:
                 )
 
             if not app_result["ok"]:
+                # Report the actual exception, not just an opaque "FAILED".
+                # This may indicate missing sandbox dependencies rather than a
+                # source-code bug. Never include the full tool result in the log.
+                details = "; ".join(str(e) for e in app_result.get("exceptions", []))
+                yield log(f"App check error: {details[-800:] or 'No exception details'}")
                 yield log("Repair: Coder Agent fixing app.py startup error...")
                 await traced_call(session, "write_code", run_id=run_id, filename="app.py",
                                 feedback="\n".join(app_result["exceptions"])[-4000:])
                 repaired.append("app.py")
                 app_result = await traced_call(session, "check_app", run_id=run_id)
                 yield log(f"After app repair - {status()}")
+                if not app_result["ok"]:
+                    details = "; ".join(str(e) for e in app_result.get("exceptions", []))
+                    yield log(f"App check still failing: {details[-800:] or 'No exception details'}")
 
             if not test_result["ok"]:
                 test_code = await traced_call(session, "read_file", run_id=run_id,

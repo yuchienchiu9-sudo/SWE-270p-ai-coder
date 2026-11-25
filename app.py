@@ -23,6 +23,7 @@ from pathlib import Path
 import gradio as gr
 
 from client import DEFAULT_REQUIREMENTS, run_pipeline_steps
+from batch_manager import manager as batch_manager, progress_html
 
 APP_PORT = 8502
 SECRET_ENV_WORDS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
@@ -218,6 +219,37 @@ def launch_app(result: dict | None) -> str:
     return f"Generated app is starting at **[{url}]({url})** (give it a few seconds)."
 
 
+# ---------- three-job batch demo ----------
+
+def start_batch_jobs(count):
+    """Launch a new batch and select its first job without discarding history."""
+    try:
+        ids = batch_manager.start_demo(int(count))
+    except (RuntimeError, OSError, ValueError) as exc:
+        raise gr.Error(str(exc)) from exc
+    rows = batch_manager.snapshot(batch_manager.latest_batch_id)
+    choices = [(f'{r["name"]} ({r["job_id"]})', r["job_id"]) for r in rows]
+    return (
+        f"Started {len(ids)} concurrent containerized jobs. "
+        "Displaying the current batch; switch to All jobs for history.",
+        gr.update(choices=choices, value=ids[0] if ids else None),
+        gr.update(value="Current batch"),
+    )
+
+
+def refresh_batch(selected, view):
+    """Show only latest batch by default; history remains inspectable."""
+    batch_id = batch_manager.latest_batch_id if view != "All jobs" else None
+    rows = batch_manager.snapshot(batch_id)
+    choices = [(f'{r["name"]} ({r["job_id"]})', r["job_id"]) for r in rows]
+    ids = [r["job_id"] for r in rows]
+    chosen = selected if selected in ids else (ids[0] if ids else None)
+    trace, usage, logs = batch_manager.inspect(chosen) if chosen else ({}, {}, "")
+    table = [[r["name"], r["job_id"], r["status"], r["percent"], r["message"], r["path"]]
+             for r in rows]
+    return progress_html(rows), table, gr.update(choices=choices, value=chosen), trace, usage, logs
+
+
 # ---------- layout ----------
 
 with gr.Blocks(title="AI Coder") as demo:
@@ -273,11 +305,62 @@ with gr.Blocks(title="AI Coder") as demo:
             )
             gr.Markdown("The complete JSON appears after generation finishes; the table above updates live.")
             trace_json_view = gr.JSON(label="Execution trace (saved as execution_trace.json)")
+        with gr.Tab("Concurrent jobs (demo)"):
+            gr.Markdown(
+                "Choose 1–3 independent Docker workers (in order: QuickDelivery, "
+                "BudgetMaster, GroupChat). QuickDelivery uses the full 11-item "
+                "examples/quickdelivery.md specification. Each has its own MCP "
+                "pipeline, workspace, execution trace and usage. Generated code "
+                "is verified in a separate keyless test sandbox on the host. "
+                "This uses real Gemini API calls and tokens; even 2 jobs can "
+                "hit shared project RPM limits."
+            )
+            batch_count = gr.Dropdown(
+                label="Number of simultaneous jobs", choices=[1, 2, 3],
+                value=2, interactive=True
+            )
+            batch_btn = gr.Button("Generate selected projects concurrently", variant="primary")
+            batch_status = gr.Markdown("No batch launched yet.")
+            batch_view = gr.Radio(
+                label="Job history", choices=["Current batch", "All jobs"],
+                value="Current batch", interactive=True
+            )
+            batch_bars = gr.HTML()
+            batch_table = gr.Dataframe(
+                headers=["Project", "Job ID", "Status", "Progress %", "Latest event", "Output folder"],
+                interactive=False, label="Jobs"
+            )
+            batch_selector = gr.Dropdown(label="Inspect job", choices=[], interactive=True)
+            with gr.Row():
+                batch_trace = gr.JSON(label="Selected job: MCP execution trace")
+                batch_usage = gr.JSON(label="Selected job: LLM usage")
+            batch_logs = gr.Textbox(label="Worker log (last 25 lines)", lines=12, interactive=False)
+            batch_timer = gr.Timer(1.0)
+
         with gr.Tab("Run the app"):
             download_file = gr.File(label="Download generated application (.zip)")
             launch_btn = gr.Button("Launch generated app")
             launch_md = gr.Markdown()
 
+    batch_btn.click(
+        start_batch_jobs, inputs=[batch_count],
+        outputs=[batch_status, batch_selector, batch_view],
+    )
+    batch_timer.tick(
+        refresh_batch,
+        inputs=[batch_selector, batch_view],
+        outputs=[batch_bars, batch_table, batch_selector, batch_trace, batch_usage, batch_logs],
+    )
+    batch_selector.input(
+        refresh_batch,
+        inputs=[batch_selector, batch_view],
+        outputs=[batch_bars, batch_table, batch_selector, batch_trace, batch_usage, batch_logs],
+    )
+    batch_view.change(
+        refresh_batch,
+        inputs=[batch_selector, batch_view],
+        outputs=[batch_bars, batch_table, batch_selector, batch_trace, batch_usage, batch_logs],
+    )
     example_btn.click(load_example, outputs=[description_in, requirements_in])
     generate_btn.click(
         generate,

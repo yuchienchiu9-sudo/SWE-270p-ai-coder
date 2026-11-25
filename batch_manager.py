@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from batch_rpc import atomic_json
+from batch_rpc import atomic_json, read_json
 from sandbox_runner import SandboxUnavailable, run_generated_python
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -180,7 +180,7 @@ class BatchManager:
         path = job.folder / "progress.json"
         if path.exists():
             try:
-                return json.loads(path.read_text(encoding="utf-8"))
+                return read_json(path)
             except (OSError, ValueError):
                 pass
         return {"status": job.status, "percent": 0, "message": job.error or "Starting"}

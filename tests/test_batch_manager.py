@@ -1,7 +1,7 @@
 """Offline, no Docker/Gemini needed: concurrent job isolation and broker checks."""
 import json
-import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from batch_manager import BatchManager, DEMO_PROJECTS, load_demo_spec, allowed_verification_args, progress_html
-from batch_rpc import atomic_json
+from batch_rpc import atomic_json, read_json
 
 
 def test_demo_specs_are_three_distinct_projects():
@@ -71,15 +71,13 @@ def test_atomic_json_write(tmp_path):
     assert not list(tmp_path.glob("*.tmp"))
 
 
-def test_atomic_json_reader_never_sees_partial_document(tmp_path):
-    """Concurrent writers + a polling reader (like the UI reading progress.json).
+def _run_reader_during_writes(path, payload, writes=200, writers=8):
+    """Hammer `path` with writers while a reader polls it with no pause at all.
 
-    Reader-thread failures are collected and re-raised in the test thread so
-    pytest reports them as a real failure, not just a thread warning.
+    The reader uses read_json(), the same reader the production code uses.
+    Reader-thread failures are re-raised here so pytest reports a real failure,
+    not just a thread warning. Returns the job numbers the reader observed.
     """
-    path = tmp_path / "progress.json"
-    payload = "x" * 20000  # large enough that a torn write would be detectable
-    atomic_json(path, {"job": -1, "payload": payload})
     stop = threading.Event()
     seen = []
     errors = []
@@ -87,13 +85,7 @@ def test_atomic_json_reader_never_sees_partial_document(tmp_path):
     def reader():
         try:
             while not stop.is_set():
-                try:
-                    text = path.read_text(encoding="utf-8")
-                except PermissionError:
-                    if os.name == "nt":
-                        continue  # Windows may briefly deny opening a file mid-rename.
-                    raise
-                data = json.loads(text)  # must never be truncated/half-written JSON
+                data = read_json(path)  # must never be truncated/half-written JSON
                 assert data["payload"] == payload, "reader saw a corrupted document"
                 seen.append(data["job"])
         except BaseException as exc:  # re-raised in the test thread below
@@ -102,8 +94,9 @@ def test_atomic_json_reader_never_sees_partial_document(tmp_path):
     reading = threading.Thread(target=reader)
     reading.start()
     try:
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            list(pool.map(lambda i: atomic_json(path, {"job": i, "payload": payload}), range(200)))
+        with ThreadPoolExecutor(max_workers=writers) as pool:
+            list(pool.map(lambda i: atomic_json(path, {"job": i, "payload": payload}),
+                          range(writes)))
     finally:
         stop.set()
         reading.join(timeout=10)
@@ -111,8 +104,128 @@ def test_atomic_json_reader_never_sees_partial_document(tmp_path):
     if errors:
         raise errors[0]
     assert seen, "reader never completed a read"
-    assert json.loads(path.read_text(encoding="utf-8"))["job"] in range(200)
+    return seen
+
+
+def test_atomic_json_reader_never_sees_partial_document(tmp_path):
+    """Concurrent writers + a tight-loop reader (far harsher than the 1 Hz UI poll)."""
+    path = tmp_path / "progress.json"
+    payload = "x" * 20000  # large enough that a torn write would be detectable
+    atomic_json(path, {"job": -1, "payload": payload})
+    _run_reader_during_writes(path, payload)
+    assert read_json(path)["job"] in range(200)
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_open_reader_never_blocks_replace_with_windows_semantics(tmp_path, monkeypatch):
+    """Regression for WinError 5 under a polling reader, reproducible on any OS.
+
+    Emulates Windows sharing rules: os.replace() onto a file fails with
+    WinError 5 while any reader still has it open (Python's open() does not use
+    FILE_SHARE_DELETE). Readers and writers must be coordinated so this never
+    happens; retries alone would only make the starvation less likely.
+    """
+    import batch_rpc
+    path = tmp_path / "progress.json"
+    payload = "y" * 2000
+    atomic_json(path, {"job": -1, "payload": payload})
+    real_read, real_replace = batch_rpc._read_bytes, batch_rpc.os.replace
+    open_handles = 0
+    counter = threading.Lock()
+    collisions = []
+
+    def windows_like_read(p):
+        nonlocal open_handles
+        with counter:
+            open_handles += 1
+        try:
+            time.sleep(0.0005)  # keep the "handle" open for a moment
+            return real_read(p)
+        finally:
+            with counter:
+                open_handles -= 1
+
+    def windows_like_replace(src, dst):
+        if Path(dst) == path and open_handles:
+            collisions.append(dst)
+            raise _win_error(5)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(batch_rpc, "_ON_WINDOWS", True)
+    monkeypatch.setattr(batch_rpc, "_read_bytes", windows_like_read)
+    monkeypatch.setattr(batch_rpc.os, "replace", windows_like_replace)
+    _run_reader_during_writes(path, payload, writes=100)
+    assert collisions == [], f"{len(collisions)} replaces hit an open reader handle"
+    assert read_json(path)["job"] in range(100)
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_read_json_retries_transient_windows_lock_then_reads(tmp_path, monkeypatch):
+    """Another process (antivirus, indexer) may briefly hold the file."""
+    import batch_rpc
+    path = tmp_path / "progress.json"
+    atomic_json(path, {"version": 1})
+    real_read = batch_rpc._read_bytes
+    failures = [_win_error(32), _win_error(5)]
+
+    def flaky_read(p):
+        if failures:
+            raise failures.pop(0)
+        return real_read(p)
+
+    monkeypatch.setattr(batch_rpc, "_ON_WINDOWS", True)
+    monkeypatch.setattr(batch_rpc, "_read_bytes", flaky_read)
+    monkeypatch.setattr(batch_rpc.time, "sleep", lambda s: None)
+    assert read_json(path) == {"version": 1}
+
+
+def test_read_json_does_not_retry_real_errors(tmp_path, monkeypatch):
+    import batch_rpc
+    monkeypatch.setattr(batch_rpc, "_ON_WINDOWS", True)
+    monkeypatch.setattr(batch_rpc.time, "sleep", lambda s: pytest.fail("must not retry"))
+    with pytest.raises(FileNotFoundError):
+        read_json(tmp_path / "missing.json")
+
+
+def test_retry_sleep_does_not_hold_the_file_lock(tmp_path, monkeypatch):
+    """While a writer backs off, the same file's lock is free for readers."""
+    import batch_rpc
+    path = tmp_path / "progress.json"
+    atomic_json(path, {"version": 1})
+    failures = [_win_error(5)]
+    real_replace = batch_rpc.os.replace
+    lock_free_during_sleep = []
+
+    def flaky_replace(src, dst):
+        if failures:
+            raise failures.pop(0)
+        return real_replace(src, dst)
+
+    def sleep(seconds):
+        lock = batch_rpc._lock_for(path)
+        lock_free_during_sleep.append(lock.acquire(blocking=False))
+        if lock_free_during_sleep[-1]:
+            lock.release()
+
+    monkeypatch.setattr(batch_rpc, "_ON_WINDOWS", True)
+    monkeypatch.setattr(batch_rpc.os, "replace", flaky_replace)
+    monkeypatch.setattr(batch_rpc.time, "sleep", sleep)
+    atomic_json(path, {"version": 2})
+    assert lock_free_during_sleep == [True]
+    assert read_json(path) == {"version": 2}
+
+
+def test_manager_progress_uses_coordinated_reader(tmp_path):
+    """Production reader of progress.json goes through read_json()."""
+    manager = BatchManager(tmp_path)
+    folder = tmp_path / "job_p"
+    folder.mkdir()
+    from batch_manager import Job
+    manager.jobs["job_p"] = Job("job_p", "QuickDelivery", folder)
+    atomic_json(folder / "progress.json", {"status": "RUNNING", "percent": 42, "message": "m"})
+    with patch("batch_manager.read_json", wraps=read_json) as reader:
+        assert manager.progress("job_p")["percent"] == 42
+    reader.assert_called_once_with(folder / "progress.json")
 
 
 def _win_error(winerror: int) -> PermissionError:

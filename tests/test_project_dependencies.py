@@ -4,7 +4,9 @@
 # Student ID: 79666292
 """Per-run dependency isolation and host-only image build tests (no Docker needed)."""
 
+import errno
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +16,9 @@ from project_dependencies import (
     image_for_dependencies,
     resolve_dependencies,
 )
+
+# File systems that refuse to create symlinks (e.g. some mounted/FAT volumes).
+SYMLINK_UNSUPPORTED_ERRNOS = {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP}
 
 
 def test_project_specific_images_are_deterministic(tmp_path):
@@ -75,18 +80,51 @@ def test_bad_dependency_never_starts_container(monkeypatch, tmp_path):
         sandbox_runner.run_generated_python(tmp_path, ["-m", "pytest"])
 
 
-def test_symlinked_and_oversized_manifest_rejected(tmp_path):
+def test_symlinked_manifest_rejected(tmp_path):
+    """Uses a real OS symlink; skipped only where this account cannot create one."""
     outside = tmp_path / "outside.txt"
     outside.write_text("matplotlib\n")
     project = tmp_path / "project"
     project.mkdir()
-    (project / "requirements.txt").symlink_to(outside)
+    try:
+        (project / "requirements.txt").symlink_to(outside)
+    except NotImplementedError as exc:
+        pytest.skip(f"Symlinks are not implemented on this platform: {exc}")
+    except OSError as exc:
+        # Skip ONLY "not allowed / not supported" errors; anything else is a real failure.
+        # WinError 1314 = ERROR_PRIVILEGE_NOT_HELD (Windows without Developer Mode/admin).
+        if getattr(exc, "winerror", None) == 1314 or exc.errno in SYMLINK_UNSUPPORTED_ERRNOS:
+            pytest.skip(f"Cannot create symlinks in this environment: {exc}")
+        raise
+    # The rejection logic is also covered on every platform by the test below.
     with pytest.raises(DependencyNotApproved, match="Symlinked"):
         resolve_dependencies(project)
-    (project / "requirements.txt").unlink()
-    (project / "requirements.txt").write_text("#" * 4097)
+
+
+def test_symlink_rejection_does_not_need_os_symlink_support(tmp_path, monkeypatch):
+    """Runs on every platform: a manifest reported as a symlink is never read."""
+    (tmp_path / "requirements.txt").write_text("matplotlib\n")
+    real_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path, "is_symlink",
+        lambda self: self.name == "requirements.txt" or real_is_symlink(self),
+    )
+    monkeypatch.setattr(Path, "read_text",
+                        lambda *a, **kw: pytest.fail("Symlinked manifest must not be read"))
+    with pytest.raises(DependencyNotApproved, match="Symlinked"):
+        resolve_dependencies(tmp_path)
+
+
+def test_oversized_manifest_rejected(tmp_path):
+    (tmp_path / "requirements.txt").write_bytes(b"#" * 4097)
     with pytest.raises(DependencyNotApproved, match="4 KiB"):
-        resolve_dependencies(project)
+        resolve_dependencies(tmp_path)
+
+
+def test_manifest_at_size_limit_is_accepted(tmp_path):
+    # write_bytes avoids Windows newline translation changing the file size.
+    (tmp_path / "requirements.txt").write_bytes(b"#" * 4096)
+    assert resolve_dependencies(tmp_path) == ()
 
 
 def test_explicit_unapproved_version_rejected(tmp_path):

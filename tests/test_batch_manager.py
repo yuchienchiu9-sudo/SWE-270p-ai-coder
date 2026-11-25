@@ -1,5 +1,6 @@
 """Offline, no Docker/Gemini needed: concurrent job isolation and broker checks."""
 import json
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -67,6 +68,129 @@ def test_atomic_json_write(tmp_path):
     with ThreadPoolExecutor(max_workers=3) as pool:
         list(pool.map(lambda i: atomic_json(path, {"job": i}), range(12)))
     assert json.loads(path.read_text())["job"] in range(12)
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_atomic_json_reader_never_sees_partial_document(tmp_path):
+    """Concurrent writers + a polling reader (like the UI reading progress.json).
+
+    Reader-thread failures are collected and re-raised in the test thread so
+    pytest reports them as a real failure, not just a thread warning.
+    """
+    path = tmp_path / "progress.json"
+    payload = "x" * 20000  # large enough that a torn write would be detectable
+    atomic_json(path, {"job": -1, "payload": payload})
+    stop = threading.Event()
+    seen = []
+    errors = []
+
+    def reader():
+        try:
+            while not stop.is_set():
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except PermissionError:
+                    if os.name == "nt":
+                        continue  # Windows may briefly deny opening a file mid-rename.
+                    raise
+                data = json.loads(text)  # must never be truncated/half-written JSON
+                assert data["payload"] == payload, "reader saw a corrupted document"
+                seen.append(data["job"])
+        except BaseException as exc:  # re-raised in the test thread below
+            errors.append(exc)
+
+    reading = threading.Thread(target=reader)
+    reading.start()
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda i: atomic_json(path, {"job": i, "payload": payload}), range(200)))
+    finally:
+        stop.set()
+        reading.join(timeout=10)
+    assert not reading.is_alive(), "reader thread did not stop"
+    if errors:
+        raise errors[0]
+    assert seen, "reader never completed a read"
+    assert json.loads(path.read_text(encoding="utf-8"))["job"] in range(200)
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def _win_error(winerror: int) -> PermissionError:
+    """A PermissionError shaped like the one Windows raises from os.replace()."""
+    exc = PermissionError(13, "Access is denied", None, winerror)
+    if getattr(exc, "winerror", None) != winerror:  # attribute only exists on Windows
+        exc.winerror = winerror
+    return exc
+
+
+def _flaky_replace(batch_rpc, failures: list):
+    """os.replace() that raises the queued exceptions before succeeding."""
+    real_replace = batch_rpc.os.replace
+    calls = []
+
+    def replace(src, dst):
+        calls.append(dst)
+        if failures:
+            raise failures.pop(0)
+        return real_replace(src, dst)
+    return replace, calls
+
+
+@pytest.mark.parametrize("winerror", [5, 32])  # ACCESS_DENIED, SHARING_VIOLATION
+def test_atomic_json_retries_transient_windows_lock(tmp_path, monkeypatch, winerror):
+    import batch_rpc
+    path = tmp_path / "progress.json"
+    atomic_json(path, {"version": 1})
+    replace, calls = _flaky_replace(batch_rpc, [_win_error(winerror) for _ in range(3)])
+    monkeypatch.setattr(batch_rpc, "_ON_WINDOWS", True)
+    monkeypatch.setattr(batch_rpc.os, "replace", replace)
+    monkeypatch.setattr(batch_rpc.time, "sleep", lambda s: None)
+    atomic_json(path, {"version": 2})
+    assert len(calls) == 4
+    assert json.loads(path.read_text(encoding="utf-8")) == {"version": 2}
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_atomic_json_persistent_lock_raises_and_keeps_old_document(tmp_path, monkeypatch):
+    """Retries are bounded; on failure the old file is intact and no temp file leaks."""
+    import batch_rpc
+    path = tmp_path / "progress.json"
+    atomic_json(path, {"version": 1})
+    replace, calls = _flaky_replace(
+        batch_rpc, [_win_error(5) for _ in range(batch_rpc._REPLACE_ATTEMPTS + 5)])
+    monkeypatch.setattr(batch_rpc, "_ON_WINDOWS", True)
+    monkeypatch.setattr(batch_rpc.os, "replace", replace)
+    monkeypatch.setattr(batch_rpc.time, "sleep", lambda s: None)
+    with pytest.raises(PermissionError):
+        atomic_json(path, {"version": 2})
+    assert len(calls) == batch_rpc._REPLACE_ATTEMPTS
+    assert json.loads(path.read_text(encoding="utf-8")) == {"version": 1}
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("on_windows, error", [
+    # A real permission problem (no winerror) must not be retried, even on Windows.
+    (True, PermissionError(13, "Permission denied")),
+    # Other Windows errors, e.g. 1314 ERROR_PRIVILEGE_NOT_HELD, are not file locks.
+    (True, "winerror-1314"),
+    # Off Windows nothing is retried, even if an error carries winerror 5.
+    (False, "winerror-5"),
+    (True, FileNotFoundError(2, "No such file or directory")),
+])
+def test_atomic_json_does_not_retry_non_transient_errors(tmp_path, monkeypatch, on_windows, error):
+    import batch_rpc
+    if isinstance(error, str):
+        error = _win_error(int(error.split("-")[1]))
+    path = tmp_path / "progress.json"
+    atomic_json(path, {"version": 1})
+    replace, calls = _flaky_replace(batch_rpc, [error])
+    monkeypatch.setattr(batch_rpc, "_ON_WINDOWS", on_windows)
+    monkeypatch.setattr(batch_rpc.os, "replace", replace)
+    monkeypatch.setattr(batch_rpc.time, "sleep", lambda s: pytest.fail("must not retry"))
+    with pytest.raises(type(error)):
+        atomic_json(path, {"version": 2})
+    assert len(calls) == 1
+    assert json.loads(path.read_text(encoding="utf-8")) == {"version": 1}
     assert not list(tmp_path.glob("*.tmp"))
 
 

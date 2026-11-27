@@ -224,3 +224,9 @@ generated/
 
 # Concurrent containerized job workspaces
 batch_runs/
+
+# QuickDelivery MCP demo state (created automatically on first tool call)
+quickdelivery/*.db
+quickdelivery/*.db-journal
+quickdelivery/*.db-wal
+quickdelivery/*.db-shm
